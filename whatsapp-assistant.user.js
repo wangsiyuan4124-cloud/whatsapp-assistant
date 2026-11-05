@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.4.0
+// @version      1.4.1
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -479,7 +479,11 @@
   #wat-pi-modal{position:fixed;inset:0;z-index:10007;display:none;background:rgba(17,27,33,.75);overflow:auto;padding:16px 0}
   #wat-pi-modal .pim-bar{display:flex;justify-content:center;gap:16px;align-items:center;color:#fff;margin-bottom:10px;font:13px system-ui,"Microsoft YaHei",sans-serif}
   #wat-pi-modal .pim-bar button{border:0;border-radius:8px;padding:4px 14px;background:#fff;color:#111b21;cursor:pointer}
-  .ws-pi{border-top:1px solid #e9edef;margin-top:12px;padding-top:4px}
+  .ws-pi{margin-top:4px}
+  .ws-tabs{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #e9edef;padding-bottom:8px;margin-bottom:4px}
+  #wat-settings button.ws-tab{background:#f0f2f5;color:#3b4a54}#wat-settings button.ws-tab.on{background:#0f2a44;color:#fff}
+  .ws-save{position:sticky;bottom:-16px;background:#fff;padding:8px 0}
+  .pi-warn{background:#fff4d6;border:1px solid #e8c46a;border-radius:8px;padding:6px 8px;margin:6px 0;font-size:12px}
   #wat-chip{position:fixed;z-index:10000;display:none;max-width:420px;padding:6px 10px;border-radius:10px;
     font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.2);cursor:pointer;white-space:pre-wrap}
   #wat-chip.wat-chip-btn{background:#25d366;color:#fff}
@@ -1056,7 +1060,7 @@
   const setDlg = h('div', { id: 'wat-settings' });
   document.documentElement.appendChild(setDlg);
 
-  function openSettings() {
+  function openSettings(tab) {
     setDlg.innerHTML = '';
     const keyIn = h('input', { type: 'password', placeholder: 'sk-…', autocomplete: 'off' });
     keyIn.value = ai.apiKey;
@@ -1076,16 +1080,28 @@
       });
     };
     renderPb();
+    const pages = {
+      basic: h('div', null,
+        h('label', null, 'DeepSeek API Key（只保存在这台电脑的浏览器里）'), keyIn,
+        h('label', null, '我方业务介绍'), bizIn,
+        h('label', null, '价格表与交易条款（价格、付款方式、交期等，AI 只会引用这里写的）'), priceIn,
+        h('label', null, '客户分级标准'), rulesIn,
+        h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表')),
+      pi: piSec,
+      pb: h('div', null, h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox),
+    };
+    const tabBtns = {};
+    const showTab = (k) => {
+      Object.keys(pages).forEach((x) => { pages[x].style.display = x === k ? '' : 'none'; tabBtns[x].classList.toggle('on', x === k); });
+    };
+    [['basic', '基本设置'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库']].forEach(([k, t]) => {
+      tabBtns[k] = h('button', { class: 'ws-tab', onclick: () => showTab(k) }, t);
+    });
     setDlg.appendChild(h('div', { class: 'ws-card' },
       h('div', { class: 'wp-head' }, h('b', null, '翻译助手设置'), h('button', { class: 'wp-x', onclick: () => { setDlg.style.display = 'none'; } }, '×')),
-      h('label', null, 'DeepSeek API Key（只保存在这台电脑的浏览器里）'), keyIn,
-      h('label', null, '我方业务介绍'), bizIn,
-      h('label', null, '价格表与交易条款（价格、付款方式、交期等，AI 只会引用这里写的）'), priceIn,
-      h('label', null, '客户分级标准'), rulesIn,
-      h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表'),
-      piSec,
-      h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox,
-      h('div', { class: 'wp-btns', style: 'justify-content:flex-end;margin-top:10px' },
+      h('div', { class: 'ws-tabs' }, Object.values(tabBtns)),
+      pages.basic, pages.pi, pages.pb,
+      h('div', { class: 'wp-btns ws-save', style: 'justify-content:flex-end;margin-top:10px' },
         h('button', { class: 'sec', onclick: () => {
           const data = JSON.stringify(ai.playbook(), null, 2);
           navigator.clipboard.writeText(data).then(() => toast('话术库已复制到剪贴板，可粘贴到记事本保存'), () => toast('复制失败', true));
@@ -1099,7 +1115,9 @@
           piSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');
+          if (panelView === 'pi' && getChatName()) openPI(false); // 刷新 PI 表单上方的提醒
         } }, '保存'))));
+    showTab(pages[tab] ? tab : 'basic');
     setDlg.style.display = 'flex';
   }
 
@@ -1305,7 +1323,7 @@
   }
 
   /* ---------- 生成 PDF ---------- */
-  async function makePiPdf(pi, cfg) {
+  async function makePiFiles(pi, cfg, baseName) {
     if (typeof html2canvas !== 'function' || !window.jspdf) throw new Error('PDF 组件没有加载成功，请刷新页面重试');
     const holder = h('div', { style: 'position:fixed;left:-20000px;top:0;z-index:-1' });
     const page = renderPiPage(pi, cfg);
@@ -1313,7 +1331,9 @@
     document.body.appendChild(holder);
     try {
       await Promise.all([...page.querySelectorAll('img')].map((im) => (im.complete ? 0 : new Promise((r) => { im.onload = im.onerror = r; }))));
-      const canvas = await html2canvas(page, { scale: 2, backgroundColor: '#ffffff', logging: false, windowWidth: 794 });
+      const canvas = await html2canvas(page, { scale: 2, backgroundColor: '#ffffff', logging: false, windowWidth: 794, useCORS: true });
+      // 图片版：客户在聊天里不用点开就能看到 PI
+      const imgBlob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9));
       const { jsPDF } = window.jspdf;
       const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
       const pw = 210, ph = 297;
@@ -1332,19 +1352,22 @@
           pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pw, c.height * pw / c.width);
         }
       }
-      return pdf.output('blob');
+      return {
+        pdf: new File([pdf.output('blob')], baseName + '.pdf', { type: 'application/pdf' }),
+        img: new File([imgBlob], baseName + '.jpg', { type: 'image/jpeg' }),
+      };
     } finally {
       holder.remove();
     }
   }
 
   // 把文件放进 WhatsApp 的发送预览（不会自动发送）
-  async function attachToChat(file) {
+  async function attachToChat(files) {
     const el = getInput();
     if (!el) throw new Error('请先打开客户聊天');
     el.focus();
     const dt = new DataTransfer();
-    dt.items.add(file);
+    files.forEach((f) => dt.items.add(f));
     el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
   }
 
@@ -1464,9 +1487,8 @@
       const cfg = piCfg.get();
       if (!cfg.bankAccount || !cfg.bankName) toast('提醒：设置里还没填银行信息', true);
       const loc = await localizeFields(pi);
-      const blob = await makePiPdf(loc, cfg);
       const safe = (pi.buyer.name || pi.buyer.phone || 'customer').replace(/[^\w\-]+/g, '_').slice(0, 40);
-      return new File([blob], pi.no + '_' + safe + '.pdf', { type: 'application/pdf' });
+      return makePiFiles(loc, cfg, pi.no + '_' + safe);
     };
     const recordSent = () => {
       commitPiNo(pi.no);
@@ -1477,23 +1499,34 @@
     };
     const previewBtn = h('button', { class: 'sec' }, '预览');
     previewBtn.onclick = busyBtn(previewBtn, async () => { showPiPreview(renderPiPage(await localizeFields(pi), piCfg.get())); });
-    const sendBtn = h('button', null, '生成 PDF 并放进聊天');
+    const withImg = h('input', { type: 'checkbox' });
+    withImg.checked = store.get('piWithImg', true);
+    withImg.addEventListener('change', () => store.set('piWithImg', withImg.checked));
+    const sendBtn = h('button', null, '生成并放进聊天');
     sendBtn.onclick = busyBtn(sendBtn, async () => {
-      const file = await build();
-      await attachToChat(file);
+      const f = await build();
+      await attachToChat(withImg.checked ? [f.img, f.pdf] : [f.pdf]);
       recordSent();
-      toast('PDF 已放进发送预览，确认后点发送');
+      toast((withImg.checked ? 'PI 图片和 PDF' : 'PDF') + ' 已放进发送预览，确认后点发送');
     });
     const dlBtn = h('button', { class: 'sec' }, '下载 PDF');
     dlBtn.onclick = busyBtn(dlBtn, async () => {
-      const file = await build();
+      const file = (await build()).pdf;
       const a = h('a', { href: URL.createObjectURL(file), download: file.name });
       document.body.appendChild(a); a.click(); a.remove();
       recordSent();
     });
 
     const b = pi.buyer;
+    const cfgNow = piCfg.get();
+    const missingCfg = [
+      !cfgNow.logo && 'Logo', !cfgNow.seal && '公章',
+      !(cfgNow.bankName && cfgNow.bankAccount && cfgNow.bankSwift) && '银行信息',
+      !(cfgNow.phone || cfgNow.email) && '公司电话/邮箱',
+    ].filter(Boolean);
     const box = h('div', { class: 'pi-ed' },
+      missingCfg.length ? h('div', { class: 'pi-warn' }, '还没设置：' + missingCfg.join('、') + '。',
+        h('button', { class: 'sec', style: 'margin-left:6px', onclick: () => openSettings('pi') }, '去设置')) : null,
       h('div', { class: 'wp-muted' }, (isNew ? 'AI 已从聊天中提取，' : '这是上次保存的 PI，') + '黄色框是需要你补充的内容。中文也可以，生成时会自动翻译。'),
       h('div', { class: 'pi-row' }, field('PI 编号', pi, 'no', { half: true }), h('label', { class: 'pi-f half' }, h('span', null, '语言'), langSel)),
       h('div', { class: 'wp-sec' }, '买方'),
@@ -1511,10 +1544,12 @@
       h('div', { class: 'wp-sec' }, '条款'),
       field('付款方式', pi, 'payment', { area: true }), field('交期', pi, 'delivery', { area: true }),
       field('质保', pi, 'warranty', { area: true, optional: true }), field('备注', pi, 'remarks', { area: true, optional: true }),
+      h('label', { class: 'ws-inline', style: 'display:flex;gap:6px;align-items:center;margin-top:10px;font-size:12px' }, withImg, '同时附一张 PI 图片（客户在聊天里直接能看到）'),
       h('div', { class: 'wp-foot pi-actions' }, sendBtn, previewBtn, dlBtn),
       h('div', { class: 'wp-foot' },
         h('button', { class: 'sec', onclick: () => { if (confirmInline(box, '重新从聊天提取会覆盖当前内容')) openPI(true); } }, '重新从聊天提取'),
         h('button', { class: 'sec', onclick: () => { pi.no = nextPiNo().no; pi.dateTs = Date.now(); save(); renderPiEditor(pi, false); toast('已换新编号 ' + pi.no); } }, '新编号（改版重发）'),
+        h('button', { class: 'sec', onclick: () => openSettings('pi') }, '⚙ 公司/银行/公章'),
         h('button', { class: 'sec', onclick: backToResult }, '← 返回分析')));
     save();
     showPanel(box, '生成 PI');
@@ -1563,7 +1598,7 @@
       return h('div', null, h('label', null, label), h('div', { style: 'display:flex;gap:8px;align-items:center' }, file, clear), prev);
     };
     const sec = h('div', { class: 'ws-pi' },
-      h('div', { class: 'wp-sec', style: 'font-size:13px;color:#111b21' }, 'PI 形式发票设置'),
+      h('div', { class: 'wp-muted' }, '这里填一次就行，以后每张 PI 都会自动带出。只保存在这台电脑的浏览器里。'),
       f('公司英文名', 'name'), f('公司中文名', 'nameCn'), f('公司地址', 'address', { area: true }),
       f('电话', 'phone'), f('邮箱', 'email'), f('网站', 'web'), f('联系人（显示在卖方栏）', 'contact'),
       imgField('Logo（可选）', 'logo'), imgField('公章图片（PNG 透明底效果最好）', 'seal'),
