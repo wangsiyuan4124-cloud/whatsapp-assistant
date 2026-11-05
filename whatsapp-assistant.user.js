@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.1.1
-// @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文。
+// @version      1.2.0
+// @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -10,6 +10,7 @@
 // @connect      translate.googleapis.com
 // @connect      edge.microsoft.com
 // @connect      api-edge.cognitive.microsofttranslator.com
+// @connect      api.deepseek.com
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js
@@ -404,7 +405,7 @@
   /* ---------------- 悬浮控制条 ---------------- */
   const style = document.createElement('style');
   style.textContent = `
-  #wat-bar{position:fixed;z-index:9999;display:none;align-items:center;gap:6px;padding:4px 8px;
+  #wat-bar{position:fixed;z-index:10004;display:none;align-items:center;gap:6px;padding:4px 8px;
     background:#fff;color:#111;border:1px solid #d1d7db;border-radius:16px;font:12px/1.4 system-ui,"Microsoft YaHei",sans-serif;
     box-shadow:0 2px 8px rgba(0,0,0,.12)}
   #wat-bar select{font:inherit;border:1px solid #d1d7db;border-radius:8px;padding:1px 2px;background:#fff;color:#111;max-width:150px}
@@ -419,6 +420,33 @@
   .wat-tr{direction:ltr;text-align:left;unicode-bidi:plaintext;margin-top:4px;padding-top:4px;border-top:1px dashed rgba(0,0,0,.18);color:#027eb5;font-size:.93em;line-height:1.45;white-space:pre-wrap;word-break:break-word}
   .wat-tr::before{content:"译：";color:#8696a0}
   .wat-tr.wat-tr-err{color:#c62828}
+  .wat-lv{display:inline-block;font:500 11px/1.5 system-ui,"Microsoft YaHei",sans-serif;padding:0 6px;border-radius:6px;margin-left:6px;vertical-align:middle}
+  .wat-lv.big{font-size:13px;padding:2px 8px;margin-left:0}
+  .wat-lv-A{background:#d9fdd3;color:#0b6b3a}.wat-lv-B{background:#dbeefc;color:#0b4f7c}.wat-lv-C{background:#fdf0cc;color:#7a5200}.wat-lv-D{background:#e9edef;color:#54656f}
+  #wat-panel{position:fixed;z-index:10002;display:none;right:16px;top:70px;width:340px;max-height:calc(100vh - 210px);overflow:auto;background:#fff;color:#111b21;
+    border:1px solid #d1d7db;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:12px 14px;font:13px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+  #wat-panel button,#wat-settings button{font:inherit;font-size:12px;border:0;border-radius:8px;padding:3px 10px;background:#25d366;color:#fff;cursor:pointer}
+  #wat-panel button.sec,#wat-settings button.sec{background:#e9edef;color:#3b4a54}
+  .wp-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}.wp-head b{font-size:14px}
+  .wp-sub{color:#667781;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #wat-panel .wp-x,#wat-settings .wp-x{background:none;color:#667781;font-size:18px;padding:0 4px}
+  .wp-tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .wp-tag{display:inline-block;background:#f0f2f5;color:#3b4a54;border-radius:6px;padding:0 6px;font-size:11px}
+  .wp-reason{margin-top:6px;color:#3b4a54}
+  .wp-sec{margin:12px 0 4px;color:#667781;font-size:12px}
+  .wp-known .ok{color:#0b6b3a}.wp-missing{margin-top:4px}.wp-missing .warn{color:#b26a00}
+  .wp-sug{border:1px solid #e9edef;border-radius:8px;padding:8px;margin-bottom:8px}
+  .wp-goal{color:#667781;font-size:12px}.wp-reply{margin:4px 0;white-space:pre-wrap}.wp-zh{color:#027eb5;font-size:12px}
+  .wp-btns{display:flex;gap:6px;margin-top:6px}.wp-foot{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}
+  .wp-muted{color:#8696a0;font-size:12px}
+  #wat-settings{position:fixed;inset:0;z-index:10006;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35)}
+  .ws-card{width:520px;max-width:92vw;max-height:88vh;overflow:auto;background:#fff;color:#111b21;border-radius:12px;padding:16px 18px;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif}
+  .ws-card label{display:block;margin:10px 0 4px;color:#3b4a54;font-size:12px}
+  .ws-card label.ws-inline{display:flex;align-items:center;gap:6px}
+  .ws-card input[type=password],.ws-card textarea{width:100%;box-sizing:border-box;border:1px solid #d1d7db;border-radius:8px;padding:6px 8px;font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif;resize:vertical}
+  .ws-pb{max-height:220px;overflow:auto;border:1px solid #e9edef;border-radius:8px;padding:4px}
+  .ws-pbi{display:flex;gap:6px;align-items:flex-start;padding:4px;border-bottom:1px solid #f0f2f5}
+  .ws-pbt{flex:1;font-size:12px}
   #wat-chip{position:fixed;z-index:10000;display:none;max-width:420px;padding:6px 10px;border-radius:10px;
     font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.2);cursor:pointer;white-space:pre-wrap}
   #wat-chip.wat-chip-btn{background:#25d366;color:#fff}
@@ -439,6 +467,8 @@
     <label title="开启后：输入含中文时按回车，自动翻译并发送"><input type="checkbox" id="wat-auto">回车自动翻译发送</label>
     <label title="对方发来的外语消息，在原文下方自动显示中文译文"><input type="checkbox" id="wat-in">对方消息译中文</label>
     <select id="wat-engine" title="翻译引擎（失败会自动换另一个）"><option value="google">谷歌</option><option value="microsoft">微软</option></select>
+    <button id="wat-analyze" title="AI 分析当前客户的级别并给出回复建议" style="background:#027eb5">分析客户</button>
+    <button id="wat-set" title="设置（API Key、价格表、话术库）" style="background:#8696a0">⚙</button>
     <button id="wat-go" title="只翻译不发送（快捷键 Ctrl+Enter）">翻译</button>
     <button id="wat-power" title="暂停/启用翻译助手">开</button>`;
   document.documentElement.appendChild(bar);
@@ -489,7 +519,412 @@
   $('wat-in').addEventListener('change', (e) => { settings.autoIn = e.target.checked; scanIncoming(); });
   $('wat-engine').addEventListener('change', (e) => { settings.engine = e.target.value; msToken = null; });
   $('wat-go').addEventListener('click', () => translateInput(false));
+  $('wat-analyze').addEventListener('click', () => analyzeCurrent(false));
+  $('wat-set').addEventListener('click', () => openSettings());
   $('wat-power').addEventListener('click', () => { settings.enabled = !settings.enabled; ui.refresh(); scanIncoming(); toast(settings.enabled ? '翻译助手已启用' : '翻译助手已暂停'); });
+
+
+  /* ======================================================================
+   *  客户分析（DeepSeek）
+   * ==================================================================== */
+  const DEFAULT_BIZ = '我们是奇瑞威麟（Chery RELY）汽车出口经销商。主要市场：中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯、萨尔瓦多、尼加拉瓜、阿鲁巴、库拉索等）。主推车型：R8 等。客户既有个人买家，也有当地经销商。广告里不写价格，引导客户私信询价。';
+  const DEFAULT_RULES = [
+    'A 马上成交：1～2 周内可能下单。信号：问了具体车型、价格、运到当地的落地价、付款方式、交期；给了收货地址或公司信息；主动说要付款/定车。',
+    'B 有明确需求：在比价，需要跟进。信号：问了车型和价格，但没谈付款和时间；或经销商在问批量价、合作条件。',
+    'C 初步了解：刚看完广告来问问。信号：只发了 "Price?"、"More info" 之类，没有回答我方追问。',
+    'D 无效：同行、骚扰、明显买不起、答非所问，或很久不回复。',
+  ].join('\n');
+  const SEED_PLAYBOOK = [
+    ['首次咨询', "Hi! Thanks for your interest in the Chery RELY. To give you the best price, may I know which country you're in and whether it's for personal use or for your business?"],
+    ['首次咨询', "Hello! Thanks for reaching out 😊 Which model are you interested in, and which city would you like it delivered to?"],
+    ['只问价格', "Good question! The price depends on the version and the delivery port. Which version do you prefer and which city are you in? Then I can send you an accurate landed price."],
+    ['只问价格', "Sure! Before I send the quote — are you looking for 1 unit or more? We have special pricing for dealers and fleet orders."],
+    ['嫌贵/比价', "I understand, it's smart to compare. Which model and version are you comparing with? Specs can differ a lot, and I want you to compare like for like."],
+    ['嫌贵/比价', "Thanks for being honest. What price did you get elsewhere? Let me check what I can do for you."],
+    ['运费/落地价', "We can ship to your nearest port. Which port or city works best for you? I'll calculate the landed cost for you."],
+    ['付款', "[按实际付款方式修改] We usually work with bank transfer: a deposit to confirm the order and the balance before shipment. Would that work for you?"],
+    ['经销商合作', "Thanks! We're looking for partners in your area. Could you tell me a bit about your business — do you have a showroom, and how many cars do you sell per month?"],
+    ['经销商合作', "For dealer orders we can offer wholesale pricing and spare parts support. How many units are you planning for the first order?"],
+    ['不回复跟进-第1天', "Hi! Just checking if you received the info about the car? Happy to answer any questions 😊"],
+    ['不回复跟进-第3天', "Hi! We're planning the next shipment. Would you like me to keep a unit for you?"],
+    ['不回复跟进-第7天', "Hi, I don't want to bother you — just let me know if you're still interested, or if the timing isn't right. I'm happy to help anytime."],
+    ['推进成交', "To prepare your proforma invoice, I just need your full name, city and the version/color you prefer. Shall we go ahead?"],
+    ['推进成交', "Would you like a quick video call? I can show you the car in detail."],
+  ];
+
+  const ai = {
+    get apiKey() { return store.get('dsKey', ''); },
+    set apiKey(v) { store.set('dsKey', v); },
+    get biz() { return store.get('bizInfo', DEFAULT_BIZ); },
+    set biz(v) { store.set('bizInfo', v); },
+    get prices() { return store.get('priceTable', ''); },
+    set prices(v) { store.set('priceTable', v); },
+    get rules() { return store.get('gradeRules', DEFAULT_RULES); },
+    set rules(v) { store.set('gradeRules', v); },
+    get autoLabel() { return store.get('autoLabel', true); },
+    set autoLabel(v) { store.set('autoLabel', v); },
+    playbook() {
+      let pb = store.get('playbook', null);
+      if (!pb) {
+        pb = SEED_PLAYBOOK.map(([scene, text], i) => ({ id: 'seed' + i, scene, text, seed: true, at: 0 }));
+        store.set('playbook', pb);
+      }
+      return pb;
+    },
+    savePlaybook(pb) { store.set('playbook', pb); },
+    analyses() { return store.get('analyses', {}); },
+    saveAnalysis(name, result) {
+      const all = ai.analyses();
+      all[name] = { level: result.level, result, at: Date.now() };
+      store.set('analyses', all);
+    },
+  };
+  const LEVEL_NAME = { A: '马上成交', B: '有需求', C: '了解中', D: '无效' };
+
+  // 读取当前聊天记录（只读已加载到页面上的消息）
+  function readConversation(maxMsgs) {
+    const main = document.querySelector('#main');
+    if (!main) return [];
+    const mainRect = main.getBoundingClientRect();
+    const out = [];
+    main.querySelectorAll('[data-testid^="conv-msg-"], .message-in, .message-out').forEach((row) => {
+      if (row.parentElement && row.parentElement.closest('[data-testid^="conv-msg-"]')) return;
+      const incoming = isIncoming(row, mainRect);
+      const span = getMsgTextSpan(row);
+      const pre = row.querySelector('.copyable-text[data-pre-plain-text]');
+      const time = pre ? (pre.getAttribute('data-pre-plain-text').match(/^\[([^\]]+)\]/) || [])[1] || '' : '';
+      let text = span ? (span.innerText || '').trim() : '';
+      if (!text) {
+        if (row.querySelector('img[src^="blob:"], [data-icon*="image"]')) text = '[图片]';
+        else if (row.querySelector('[data-icon*="audio"], [data-icon*="ptt"], audio')) text = '[语音]';
+        else if (row.querySelector('[data-icon*="video"], video')) text = '[视频]';
+        else if (row.querySelector('[data-icon*="document"], [data-icon*="doc"]')) text = '[文件]';
+        else return;
+      }
+      out.push({ from: incoming ? '客户' : '我方', time, text: text.slice(0, 1200) });
+    });
+    return out.slice(-(maxMsgs || 60));
+  }
+
+  function buildPrompt(conv, chatName) {
+    const pb = ai.playbook();
+    const pbSorted = pb.slice().sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 40);
+    const prices = ai.prices.trim();
+    const system = [
+      '你是一名资深的外贸汽车销售顾问，帮助中国经销商分析 WhatsApp 客户并给出回复建议。',
+      '【我方业务】\n' + ai.biz,
+      '【客户分级标准】\n' + ai.rules,
+      '【价格表】\n' + (prices || '（暂无。不要给出任何具体价格、优惠或交期数字。）'),
+      '【话术库（参考风格和推进思路，可改写，不要照抄方括号里的备注）】\n' +
+        pbSorted.map((p) => '- [' + p.scene + '] ' + p.text).join('\n'),
+      '【规则】',
+      '1. 只根据聊天内容判断，没提到的信息填"未知"，不要猜。',
+      '2. 价格、优惠、交期、库存等具体数字只能来自价格表；价格表里没有的，回复里不要编数字，改为追问细节或说明会尽快报价。',
+      '3. 建议回复用客户使用的语言，像 WhatsApp 聊天一样简短自然（每条不超过 60 个单词），每条都要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。',
+      '4. 给 2～3 条思路不同的建议回复。如果最后一条是我方发的、客户还没回，就给跟进话术。',
+      '5. 只输出 JSON，不要任何其他文字。格式：',
+      '{"level":"A|B|C|D","customer_type":"个人|经销商|未知","language":"客户语言，如 English/Español",' +
+        '"reason":"一句话中文理由","known":{"国家":"","车型":"","数量":"","预算":"","付款方式":"","购买时间":""},' +
+        '"missing":["还缺的关键信息，中文"],"suggestions":[{"scene":"场景，中文","goal":"这条回复的目的，中文","reply":"客户语言的回复原文","reply_zh":"中文意思"}],' +
+        '"next_followup":{"when":"建议跟进时间，如 明天上午","action":"中文，跟进做什么"}}',
+    ].join('\n\n');
+    const user = '客户：' + (chatName || '未知') + '\n聊天记录（按时间顺序）：\n' +
+      conv.map((m) => (m.time ? '[' + m.time + '] ' : '') + m.from + '：' + m.text).join('\n');
+    return { system, user };
+  }
+
+  function callDeepSeek(system, user) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: 'https://api.deepseek.com/chat/completions',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ai.apiKey },
+        data: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          response_format: { type: 'json_object' },
+          temperature: 0.4,
+          max_tokens: 1500,
+        }),
+        timeout: 90000,
+        onload: (r) => {
+          if (r.status === 401) return reject(new Error('API Key 不正确，请在设置里检查'));
+          if (r.status === 402) return reject(new Error('DeepSeek 账户余额不足，请充值'));
+          if (r.status < 200 || r.status >= 300) return reject(new Error('DeepSeek 返回错误 HTTP ' + r.status));
+          try {
+            const data = JSON.parse(r.responseText);
+            const txt = data.choices[0].message.content;
+            resolve(JSON.parse(txt.replace(/^```(json)?|```$/g, '').trim()));
+          } catch (e) { reject(new Error('AI 返回的内容无法解析，请重试')); }
+        },
+        onerror: () => reject(new Error('连不上 DeepSeek，请检查网络')),
+        ontimeout: () => reject(new Error('DeepSeek 响应超时，请重试')),
+      });
+    });
+  }
+
+  function normalizeResult(r) {
+    r = r || {};
+    const lv = String(r.level || '').trim().toUpperCase().charAt(0);
+    r.level = 'ABCD'.includes(lv) && lv ? lv : 'C';
+    r.known = r.known && typeof r.known === 'object' ? r.known : {};
+    r.missing = Array.isArray(r.missing) ? r.missing : [];
+    r.suggestions = Array.isArray(r.suggestions) ? r.suggestions.filter((s) => s && s.reply).slice(0, 3) : [];
+    r.next_followup = r.next_followup || {};
+    return r;
+  }
+
+  /* ---------- 自动加入 WhatsApp Business 列表（A/B/C/D） ---------- */
+  function findListButton() {
+    return [...document.querySelectorAll('#main header [role="button"], #main header button')]
+      .find((b) => /添加到列表|加入列表|Add to list/i.test(b.getAttribute('aria-label') || ''));
+  }
+  async function openListMenu() {
+    const btn = findListButton();
+    if (!btn) return null;
+    btn.click();
+    for (let i = 0; i < 15; i++) {
+      await sleep(100);
+      const m = document.querySelector('[role="menu"]');
+      if (m && m.querySelector('[role="menuitemcheckbox"]')) return m;
+    }
+    return null;
+  }
+  function closeMenu() {
+    const m = document.querySelector('[role="menu"]');
+    if (!m) return;
+    const ev = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
+    (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', ev));
+    m.dispatchEvent(new KeyboardEvent('keydown', ev));
+  }
+  const levelOfItem = (li) => {
+    const m = (li.innerText || '').trim().match(/^([ABCD])(?:\s|级|$)/i);
+    return m ? m[1].toUpperCase() : null;
+  };
+  async function applyLevelList(level) {
+    for (let round = 0; round < 6; round++) {
+      const menu = await openListMenu();
+      if (!menu) return { ok: false, msg: '没找到「添加到列表」按钮' };
+      const items = [...menu.querySelectorAll('[role="menuitemcheckbox"]')].filter(levelOfItem);
+      if (!items.length) { closeMenu(); return { ok: false, msg: '没找到 A/B/C/D 列表，请先在 WhatsApp 里建好' }; }
+      const wrong = items.find((li) => (levelOfItem(li) === level) !== (li.getAttribute('aria-checked') === 'true'));
+      if (!wrong) { closeMenu(); await sleep(150); closeMenu(); return { ok: true }; }
+      wrong.click();
+      await sleep(500);
+      closeMenu();
+      await sleep(250);
+    }
+    closeMenu();
+    return { ok: false, msg: '打标签没有成功，请手动加入列表' };
+  }
+
+  /* ---------- 分析面板 ---------- */
+  const h = (tag, attrs, ...kids) => {
+    const el = document.createElement(tag);
+    if (attrs) for (const k in attrs) {
+      if (k === 'class') el.className = attrs[k];
+      else if (k === 'style') el.style.cssText = attrs[k];
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), attrs[k]);
+      else el.setAttribute(k, attrs[k]);
+    }
+    kids.flat().forEach((c) => { if (c != null && c !== false) el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return el;
+  };
+
+  const panel = h('div', { id: 'wat-panel' });
+  document.documentElement.appendChild(panel);
+  let panelChat = '';
+
+  function showPanel(content) {
+    panel.innerHTML = '';
+    panel.appendChild(h('div', { class: 'wp-head' },
+      h('b', null, '客户分析'),
+      h('span', { class: 'wp-sub' }, panelChat),
+      h('button', { class: 'wp-x', title: '关闭', onclick: () => { panel.style.display = 'none'; } }, '×')));
+    panel.appendChild(content);
+    panel.style.display = 'block';
+  }
+
+  function renderResult(r, at) {
+    const box = h('div', null);
+    box.appendChild(h('div', { class: 'wp-tags' },
+      h('span', { class: 'wat-lv wat-lv-' + r.level + ' big' }, r.level + ' ' + LEVEL_NAME[r.level]),
+      r.customer_type ? h('span', { class: 'wp-tag' }, String(r.customer_type)) : null,
+      r.language ? h('span', { class: 'wp-tag' }, String(r.language)) : null));
+    if (r.reason) box.appendChild(h('div', { class: 'wp-reason' }, String(r.reason)));
+
+    const known = Object.entries(r.known).filter(([, v]) => v && !/^未知|unknown$/i.test(String(v).trim()));
+    box.appendChild(h('div', { class: 'wp-sec' }, '已知信息'));
+    box.appendChild(h('div', { class: 'wp-known' }, known.length
+      ? known.map(([k, v]) => h('div', null, h('span', { class: 'ok' }, '✓ '), k + '：' + v))
+      : h('div', { class: 'wp-muted' }, '暂无')));
+    if (r.missing.length) {
+      box.appendChild(h('div', { class: 'wp-missing' }, h('span', { class: 'warn' }, '？ '), '还缺：' + r.missing.join('、')));
+    }
+
+    box.appendChild(h('div', { class: 'wp-sec' }, '建议回复'));
+    if (!r.suggestions.length) box.appendChild(h('div', { class: 'wp-muted' }, 'AI 没有给出建议，请重试'));
+    r.suggestions.forEach((s) => {
+      const saveBtn = h('button', { class: 'sec', onclick: () => {
+        const pb = ai.playbook();
+        if (pb.some((p) => p.text === s.reply)) { toast('话术库里已经有这条了'); return; }
+        pb.push({ id: 'u' + Date.now(), scene: s.scene || '自定义', text: s.reply, zh: s.reply_zh || '', level: r.level, at: Date.now() });
+        ai.savePlaybook(pb);
+        saveBtn.textContent = '已收藏';
+        toast('已收藏到话术库（共 ' + pb.length + ' 条）');
+      } }, '☆ 收藏');
+      box.appendChild(h('div', { class: 'wp-sug' },
+        h('div', { class: 'wp-goal' }, (s.scene ? '【' + s.scene + '】' : '') + (s.goal || '')),
+        h('div', { class: 'wp-reply' }, String(s.reply)),
+        s.reply_zh ? h('div', { class: 'wp-zh' }, '中文：' + s.reply_zh) : null,
+        h('div', { class: 'wp-btns' },
+          h('button', { onclick: async () => {
+            const el = getInput();
+            if (!el) { toast('请先打开聊天', true); return; }
+            if (await replaceInputText(el, String(s.reply))) { lastTranslated = getInputText(el); el.focus(); toast('已填入输入框，检查后按回车发送'); }
+            else toast('填入失败，请手动复制', true);
+          } }, '填入'),
+          saveBtn)));
+    });
+
+    const nf = r.next_followup || {};
+    if (nf.when || nf.action) {
+      box.appendChild(h('div', { class: 'wp-sec' }, '下一步'));
+      box.appendChild(h('div', null, '⏰ ' + [nf.when, nf.action].filter(Boolean).join(' · ')));
+    }
+    box.appendChild(h('div', { class: 'wp-foot' },
+      h('button', { class: 'sec', onclick: saveMyLastMessage }, '☆ 收藏我发的最后一条'),
+      h('button', { class: 'sec', onclick: () => analyzeCurrent(true) }, '重新分析')));
+    if (at) box.appendChild(h('div', { class: 'wp-muted', style: 'margin-top:6px' }, '分析时间：' + new Date(at).toLocaleString()));
+    return box;
+  }
+
+  function saveMyLastMessage() {
+    const mine = readConversation(80).filter((m) => m.from === '我方' && !/^\[(图片|语音|视频|文件)\]$/.test(m.text));
+    const last = mine[mine.length - 1];
+    if (!last) { toast('这个聊天里没有找到你发的文字消息', true); return; }
+    const pb = ai.playbook();
+    if (pb.some((p) => p.text === last.text)) { toast('话术库里已经有这条了'); return; }
+    const rec = ai.analyses()[getChatName()];
+    pb.push({ id: 'u' + Date.now(), scene: '我的回复', text: last.text, level: rec ? rec.level : '', at: Date.now() });
+    ai.savePlaybook(pb);
+    toast('已收藏：' + last.text.slice(0, 40) + (last.text.length > 40 ? '…' : ''));
+  }
+
+  let analyzing = false;
+  async function analyzeCurrent(force) {
+    const name = getChatName();
+    if (!document.querySelector('#main') || !name) { toast('请先打开一个聊天', true); return; }
+    panelChat = name;
+    if (!ai.apiKey) {
+      showPanel(h('div', null, h('p', null, '还没有填写 DeepSeek API Key。'), h('button', { onclick: openSettings }, '打开设置')));
+      return;
+    }
+    const saved = ai.analyses()[name];
+    if (saved && !force) { showPanel(renderResult(normalizeResult(saved.result), saved.at)); return; }
+    if (analyzing) return;
+    const conv = readConversation(60);
+    if (!conv.length) { toast('这个聊天里没有可分析的文字消息', true); return; }
+    analyzing = true;
+    showPanel(h('div', { class: 'wp-muted', style: 'padding:20px 0;text-align:center' }, '正在分析 ' + conv.length + ' 条消息…'));
+    try {
+      const { system, user } = buildPrompt(conv, name);
+      const r = normalizeResult(await callDeepSeek(system, user));
+      ai.saveAnalysis(name, r);
+      if (getChatName() === name) showPanel(renderResult(r, Date.now()));
+      markChatList();
+      if (ai.autoLabel && getChatName() === name) {
+        const res = await applyLevelList(r.level);
+        toast(res.ok ? '已加入列表「' + r.level + ' ' + LEVEL_NAME[r.level] + '」' : res.msg, !res.ok);
+      }
+    } catch (e) {
+      showPanel(h('div', null, h('p', { style: 'color:#c62828' }, '分析失败：' + e.message), h('button', { onclick: () => analyzeCurrent(true) }, '重试')));
+    } finally {
+      analyzing = false;
+    }
+  }
+
+  // 切换聊天时：有分析记录就自动显示，没有就收起面板
+  setInterval(() => {
+    const name = getChatName();
+    if (panel.style.display !== 'block' || !name || name === panelChat) return;
+    panelChat = name;
+    const saved = ai.analyses()[name];
+    if (saved) showPanel(renderResult(normalizeResult(saved.result), saved.at));
+    else panel.style.display = 'none';
+  }, 700);
+
+  /* ---------- 左侧聊天列表显示级别 ---------- */
+  function markChatList() {
+    const side = document.querySelector('#pane-side');
+    if (!side) return;
+    const all = ai.analyses();
+    side.querySelectorAll('[role="row"], [role="listitem"]').forEach((row) => {
+      const t = row.querySelector('[data-testid="cell-frame-title"] span[title], span[title]');
+      if (!t) return;
+      const rec = all[(t.getAttribute('title') || '').trim()];
+      let badge = row.querySelector('.wat-lv-badge');
+      if (!rec) { if (badge) badge.remove(); return; }
+      if (!badge) {
+        badge = document.createElement('span');
+        t.insertAdjacentElement('afterend', badge);
+      }
+      const cls = 'wat-lv wat-lv-badge wat-lv-' + rec.level;
+      if (badge.className !== cls) badge.className = cls;
+      if (badge.textContent !== rec.level) badge.textContent = rec.level;
+      badge.title = rec.level + ' ' + LEVEL_NAME[rec.level];
+    });
+  }
+  setInterval(markChatList, 1500);
+
+  /* ---------- 设置面板 ---------- */
+  const setDlg = h('div', { id: 'wat-settings' });
+  document.documentElement.appendChild(setDlg);
+
+  function openSettings() {
+    setDlg.innerHTML = '';
+    const keyIn = h('input', { type: 'password', placeholder: 'sk-…', autocomplete: 'off' });
+    keyIn.value = ai.apiKey;
+    const bizIn = h('textarea', { rows: '4' }); bizIn.value = ai.biz;
+    const priceIn = h('textarea', { rows: '4', placeholder: '例：R8 标准版 FOB 上海 USD xxxx；运到伯利兹城落地价 USD xxxx（留空则 AI 不报任何数字）' }); priceIn.value = ai.prices;
+    const rulesIn = h('textarea', { rows: '5' }); rulesIn.value = ai.rules;
+    const labelIn = h('input', { type: 'checkbox' }); labelIn.checked = ai.autoLabel;
+    const pbBox = h('div', { class: 'ws-pb' });
+    const renderPb = () => {
+      pbBox.innerHTML = '';
+      const pb = ai.playbook();
+      pb.slice().reverse().forEach((p) => {
+        pbBox.appendChild(h('div', { class: 'ws-pbi' },
+          h('span', { class: 'wp-tag' }, p.scene + (p.level ? ' · ' + p.level : '')),
+          h('span', { class: 'ws-pbt' }, p.text),
+          h('button', { class: 'sec', title: '删除', onclick: () => { ai.savePlaybook(ai.playbook().filter((x) => x.id !== p.id)); renderPb(); } }, '删')));
+      });
+    };
+    renderPb();
+    setDlg.appendChild(h('div', { class: 'ws-card' },
+      h('div', { class: 'wp-head' }, h('b', null, '翻译助手设置'), h('button', { class: 'wp-x', onclick: () => { setDlg.style.display = 'none'; } }, '×')),
+      h('label', null, 'DeepSeek API Key（只保存在这台电脑的浏览器里）'), keyIn,
+      h('label', null, '我方业务介绍'), bizIn,
+      h('label', null, '价格表（AI 只会引用这里的数字）'), priceIn,
+      h('label', null, '客户分级标准'), rulesIn,
+      h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表'),
+      h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面）'), pbBox,
+      h('div', { class: 'wp-btns', style: 'justify-content:flex-end;margin-top:10px' },
+        h('button', { class: 'sec', onclick: () => {
+          const data = JSON.stringify(ai.playbook(), null, 2);
+          navigator.clipboard.writeText(data).then(() => toast('话术库已复制到剪贴板，可粘贴到记事本保存'), () => toast('复制失败', true));
+        } }, '导出话术库'),
+        h('button', { onclick: () => {
+          ai.apiKey = keyIn.value.trim();
+          ai.biz = bizIn.value.trim() || DEFAULT_BIZ;
+          ai.prices = priceIn.value;
+          ai.rules = rulesIn.value.trim() || DEFAULT_RULES;
+          ai.autoLabel = labelIn.checked;
+          setDlg.style.display = 'none';
+          toast('设置已保存');
+        } }, '保存'))));
+    setDlg.style.display = 'flex';
+  }
 
   ui.refresh();
   setInterval(ui.position, 500);
