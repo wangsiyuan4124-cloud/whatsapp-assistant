@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.3.0
+// @version      1.3.1
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -190,6 +190,7 @@
 
   /* ---------------- 核心流程 ---------------- */
   let busy = false;
+  let dragging = null; // 正在拖动工具栏
   let bypassNextEnter = false;
   let lastTranslated = ''; // 已翻译过的内容，回车时不再重复翻译
 
@@ -412,6 +413,11 @@
   #wat-bar label{display:flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap}
   #wat-bar button{white-space:nowrap;font:inherit;border:0;border-radius:10px;padding:2px 8px;background:#25d366;color:#fff;cursor:pointer}
   #wat-bar button:disabled{opacity:.5;cursor:default}
+  #wat-handle{cursor:move;user-select:none;padding:0 2px}
+  #wat-bar.mini > :not(#wat-handle):not(#wat-min){display:none !important}
+  #wat-bar.in-panel{flex-wrap:wrap;border-radius:0;border:0;border-bottom:1px solid #e9edef;box-shadow:none;padding:8px 14px;box-sizing:border-box}
+  #wat-bar.in-panel #wat-handle,#wat-bar.in-panel #wat-min{display:none}
+  .wp-slot{flex:none}
   #wat-bar .wat-off{background:#8696a0}
   #wat-toast{position:fixed;z-index:10000;left:50%;bottom:90px;transform:translateX(-50%);max-width:60vw;white-space:pre-wrap;
     background:#111b21;color:#fff;padding:8px 14px;border-radius:10px;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;
@@ -475,7 +481,7 @@
   const bar = document.createElement('div');
   bar.id = 'wat-bar';
   bar.innerHTML = `
-    <span title="WhatsApp 发送翻译">🌐</span>
+    <span id="wat-handle" title="按住拖动工具栏；双击恢复默认位置">🌐</span>
     <select id="wat-lang" title="本聊天发送语言（每个聊天单独记忆）">${LANGS.map(([c, n]) => `<option value="${c}">${n}</option>`).join('')}</select>
     <label title="开启后：输入含中文时按回车，自动翻译并发送"><input type="checkbox" id="wat-auto">回车自动翻译发送</label>
     <label title="对方发来的外语消息，在原文下方自动显示中文译文"><input type="checkbox" id="wat-in">对方消息译中文</label>
@@ -483,7 +489,8 @@
     <button id="wat-analyze" title="AI 分析当前客户的级别并给出回复建议" style="background:#027eb5">分析客户</button>
     <button id="wat-set" title="设置（API Key、价格表、话术库）" style="background:#8696a0">⚙</button>
     <button id="wat-go" title="只翻译不发送（快捷键 Ctrl+Enter）">翻译</button>
-    <button id="wat-power" title="暂停/启用翻译助手">开</button>`;
+    <button id="wat-power" title="暂停/启用翻译助手">开</button>
+    <button id="wat-min" title="收起/展开工具栏" style="background:#e9edef;color:#3b4a54">–</button>`;
   document.documentElement.appendChild(bar);
 
   const $ = (id) => bar.querySelector('#' + id);
@@ -516,12 +523,39 @@
     },
     setBusy(b) { $('wat-go').disabled = b || !settings.enabled; $('wat-go').textContent = b ? '翻译中…' : '翻译'; },
     position() {
-      const footer = document.querySelector('#main footer');
-      if (!footer) { bar.style.display = 'none'; return; }
-      const r = footer.getBoundingClientRect();
-      bar.style.display = 'flex';
-      bar.style.top = Math.max(0, r.top - bar.offsetHeight - 6) + 'px';
-      bar.style.left = (r.right - bar.offsetWidth - 12) + 'px';
+      const slot = document.documentElement.classList.contains('wat-docked') && document.getElementById('wat-barslot');
+      if (slot) {
+        // 三栏模式：工具栏放在右栏顶部，不挡聊天
+        const sr = slot.getBoundingClientRect();
+        bar.classList.add('in-panel');
+        bar.classList.remove('mini');
+        bar.style.display = 'flex';
+        bar.style.width = sr.width + 'px';
+        bar.style.left = sr.left + 'px';
+        bar.style.top = sr.top + 'px';
+        const hh = bar.offsetHeight + 'px';
+        if (slot.style.height !== hh) slot.style.height = hh;
+      } else {
+        const footer = document.querySelector('#main footer');
+        if (!footer) { bar.style.display = 'none'; return; }
+        bar.classList.remove('in-panel');
+        bar.classList.toggle('mini', !!store.get('barMin', false));
+        bar.style.width = '';
+        bar.style.display = 'flex';
+        if (dragging) return;
+        const pos = store.get('barPos', null);
+        let left, top;
+        if (pos) {
+          left = window.innerWidth - pos.r - bar.offsetWidth;
+          top = window.innerHeight - pos.b - bar.offsetHeight;
+        } else {
+          const r = footer.getBoundingClientRect();
+          left = r.right - bar.offsetWidth - 12;
+          top = r.top - bar.offsetHeight - 6;
+        }
+        bar.style.left = Math.min(Math.max(0, left), window.innerWidth - bar.offsetWidth) + 'px';
+        bar.style.top = Math.min(Math.max(0, top), window.innerHeight - bar.offsetHeight) + 'px';
+      }
       const chat = getChatName();
       if (chat !== ui.lastChat) { ui.lastChat = chat; ui.refresh(); }
     },
@@ -767,9 +801,12 @@
   let panelView = 'result'; // result | refine
 
   function dock(on) {
+    const was = document.documentElement.classList.contains('wat-docked');
     document.documentElement.classList.toggle('wat-docked', on);
     panel.style.display = on ? 'flex' : 'none';
-    window.dispatchEvent(new Event('resize'));
+    store.set('docked', on); // 记住三栏状态，下次打开 WhatsApp 自动恢复
+    if (was !== on) window.dispatchEvent(new Event('resize'));
+    ui.position();
   }
 
   function showPanel(content, title) {
@@ -777,7 +814,8 @@
     panel.appendChild(h('div', { class: 'wp-head' },
       h('b', null, title || '客户分析'),
       h('span', { class: 'wp-sub' }, panelChat),
-      h('button', { class: 'wp-x', title: '关闭', onclick: () => dock(false) }, '×')));
+      h('button', { class: 'wp-x', title: '关闭第三栏', onclick: () => dock(false) }, '×')));
+    panel.appendChild(h('div', { class: 'wp-slot', id: 'wat-barslot' }));
     panel.appendChild(h('div', { class: 'wp-body' }, content));
     dock(true);
   }
@@ -977,17 +1015,26 @@
   }
 
   // 切换聊天时：第三栏跟着切换到该客户的分析结果
-  setInterval(() => {
+  function syncPanel() {
     const name = getChatName();
     if (!document.documentElement.classList.contains('wat-docked')) return;
-    if (!name) { dock(false); return; }
+    if (!name) {
+      // 没打开聊天（或页面正在重新排版）时不收起第三栏，只显示提示
+      if (panelChat !== '' || !panel.firstChild) {
+        panelChat = '';
+        showPanel(h('div', { class: 'wp-muted', style: 'padding:24px 0;text-align:center' }, '打开一个客户聊天，这里会显示分析'));
+      }
+      return;
+    }
     if (name === panelChat) return;
     panelChat = name;
     panelView = 'result';
     const saved = ai.analyses()[name];
     if (saved) showPanel(renderResult(normalizeResult(saved.result), saved.at));
     else showNotAnalyzed();
-  }, 700);
+  }
+  setInterval(syncPanel, 700);
+  if (store.get('docked', false)) { document.documentElement.classList.add('wat-docked'); panel.style.display = 'flex'; syncPanel(); }
 
   /* ---------- 设置面板 ---------- */
   const setDlg = h('div', { id: 'wat-settings' });
@@ -1036,6 +1083,35 @@
         } }, '保存'))));
     setDlg.style.display = 'flex';
   }
+
+  /* ---------- 工具栏拖动 / 收起 ---------- */
+  $('wat-handle').addEventListener('mousedown', (e) => {
+    if (bar.classList.contains('in-panel')) return;
+    e.preventDefault();
+    const r = bar.getBoundingClientRect();
+    dragging = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const left = Math.min(Math.max(0, e.clientX - dragging.dx), window.innerWidth - bar.offsetWidth);
+    const top = Math.min(Math.max(0, e.clientY - dragging.dy), window.innerHeight - bar.offsetHeight);
+    bar.style.left = left + 'px';
+    bar.style.top = top + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = null;
+    const r = bar.getBoundingClientRect();
+    store.set('barPos', { r: Math.round(window.innerWidth - r.right), b: Math.round(window.innerHeight - r.bottom) });
+  });
+  $('wat-handle').addEventListener('dblclick', () => { store.set('barPos', null); ui.position(); toast('工具栏已恢复默认位置'); });
+  $('wat-min').addEventListener('click', () => {
+    const v = !store.get('barMin', false);
+    store.set('barMin', v);
+    $('wat-min').textContent = v ? '+' : '–';
+    ui.position();
+  });
+  $('wat-min').textContent = store.get('barMin', false) ? '+' : '–';
 
   ui.refresh();
   setInterval(ui.position, 500);
