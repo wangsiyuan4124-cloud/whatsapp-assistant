@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.3.1
-// @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议。
+// @version      1.4.0
+// @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -11,6 +11,8 @@
 // @connect      edge.microsoft.com
 // @connect      api-edge.cognitive.microsofttranslator.com
 // @connect      api.deepseek.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js
@@ -462,10 +464,22 @@
   .ws-card{width:520px;max-width:92vw;max-height:88vh;overflow:auto;background:#fff;color:#111b21;border-radius:12px;padding:16px 18px;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif}
   .ws-card label{display:block;margin:10px 0 4px;color:#3b4a54;font-size:12px}
   .ws-card label.ws-inline{display:flex;align-items:center;gap:6px}
-  .ws-card input[type=password],.ws-card textarea{width:100%;box-sizing:border-box;border:1px solid #d1d7db;border-radius:8px;padding:6px 8px;font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif;resize:vertical}
+  .ws-card input[type=password],.ws-card input[type=text],.ws-card textarea{width:100%;box-sizing:border-box;border:1px solid #d1d7db;border-radius:8px;padding:6px 8px;font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif;resize:vertical}
   .ws-pb{max-height:220px;overflow:auto;border:1px solid #e9edef;border-radius:8px;padding:4px}
   .ws-pbi{display:flex;gap:6px;align-items:flex-start;padding:4px;border-bottom:1px solid #f0f2f5}
   .ws-pbt{flex:1;font-size:12px}
+  .pi-ed .pi-f{display:block;margin:4px 0}.pi-ed .pi-f > span{display:block;font-size:11px;color:#667781}
+  .pi-ed .pi-row{display:flex;gap:8px}.pi-ed .pi-f.half{flex:1;min-width:0}
+  .pi-in{width:100%;box-sizing:border-box;border:1px solid #d1d7db;border-radius:6px;padding:4px 6px;font:12px/1.4 system-ui,"Microsoft YaHei",sans-serif;background:#fff;color:#111b21;resize:vertical}
+  .pi-in.pi-miss{background:#fff4d6;border-color:#e8c46a}
+  .pi-item{border:1px solid #e9edef;border-radius:8px;padding:6px 8px;margin-bottom:6px}
+  .pi-item-h{display:flex;justify-content:space-between;align-items:center}
+  .pi-total{margin:8px 0;padding:6px 10px;background:#0f2a44;color:#fff;border-radius:6px;font-weight:600;text-align:right}
+  .pi-actions button{font-size:13px !important;padding:5px 12px !important}
+  #wat-pi-modal{position:fixed;inset:0;z-index:10007;display:none;background:rgba(17,27,33,.75);overflow:auto;padding:16px 0}
+  #wat-pi-modal .pim-bar{display:flex;justify-content:center;gap:16px;align-items:center;color:#fff;margin-bottom:10px;font:13px system-ui,"Microsoft YaHei",sans-serif}
+  #wat-pi-modal .pim-bar button{border:0;border-radius:8px;padding:4px 14px;background:#fff;color:#111b21;cursor:pointer}
+  .ws-pi{border-top:1px solid #e9edef;margin-top:12px;padding-top:4px}
   #wat-chip{position:fixed;z-index:10000;display:none;max-width:420px;padding:6px 10px;border-radius:10px;
     font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.2);cursor:pointer;white-space:pre-wrap}
   #wat-chip.wat-chip-btn{background:#25d366;color:#fff}
@@ -872,6 +886,7 @@
       box.appendChild(h('div', null, '⏰ ' + [nf.when, nf.action].filter(Boolean).join(' · ')));
     }
     box.appendChild(h('div', { class: 'wp-foot' },
+      h('button', { onclick: () => openPI(false) }, '📄 生成 PI'),
       h('button', { class: 'sec', onclick: () => openRefine({ reply: '', reply_zh: '', scene: '自定义' }, r) }, '✎ 让 AI 写一条'),
       h('button', { class: 'sec', onclick: saveMyLastMessage }, '☆ 收藏我发的最后一条'),
       h('button', { class: 'sec', onclick: () => analyzeCurrent(true) }, '重新分析')));
@@ -969,7 +984,8 @@
     panelView = 'result';
     showPanel(h('div', { style: 'padding:24px 0;text-align:center' },
       h('div', { class: 'wp-muted', style: 'margin-bottom:10px' }, '这个客户还没有分析'),
-      h('button', { onclick: () => analyzeCurrent(true) }, '分析客户')));
+      h('button', { onclick: () => analyzeCurrent(true) }, '分析客户'), ' ',
+      h('button', { class: 'sec', onclick: () => openPI(false) }, '📄 生成 PI')));
   }
 
   function saveMyLastMessage() {
@@ -1048,6 +1064,7 @@
     const priceIn = h('textarea', { rows: '5', placeholder: '例：R8 标准版 FOB 上海 USD xxxx；运到伯利兹城落地价 USD xxxx；付款：T/T 30% 定金，70% 发货前付清；交期：付款后 xx 天（留空则 AI 不提任何价格和条件）' }); priceIn.value = ai.prices;
     const rulesIn = h('textarea', { rows: '5' }); rulesIn.value = ai.rules;
     const labelIn = h('input', { type: 'checkbox' }); labelIn.checked = ai.autoLabel;
+    const piSec = piSettingsSection();
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
       pbBox.innerHTML = '';
@@ -1066,6 +1083,7 @@
       h('label', null, '价格表与交易条款（价格、付款方式、交期等，AI 只会引用这里写的）'), priceIn,
       h('label', null, '客户分级标准'), rulesIn,
       h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表'),
+      piSec,
       h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox,
       h('div', { class: 'wp-btns', style: 'justify-content:flex-end;margin-top:10px' },
         h('button', { class: 'sec', onclick: () => {
@@ -1078,10 +1096,488 @@
           ai.prices = priceIn.value;
           ai.rules = rulesIn.value.trim() || DEFAULT_RULES;
           ai.autoLabel = labelIn.checked;
+          piSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');
         } }, '保存'))));
     setDlg.style.display = 'flex';
+  }
+
+  /* ======================================================================
+   *  PI 形式发票：从聊天提取 → 编辑 → 生成 PDF → 放进 WhatsApp 发送预览
+   * ==================================================================== */
+  const SELLER_DEFAULT = {
+    name: 'BOUNDLESS AUTOMOTIVE LIMITED',
+    nameCn: '無界汽車有限公司',
+    address: 'Rm 11, 13/F, Block C, Wong King Industrial Building, 192-198 Choi Hung Road, San Po Kong, Kowloon, Hong Kong',
+    phone: '', email: '', web: 'cheryamc.com', contact: '',
+    bankBeneficiary: 'BOUNDLESS AUTOMOTIVE LIMITED', bankName: '', bankAddress: '', bankSwift: '', bankAccount: '',
+    logo: '', seal: '',
+    payment: '', delivery: '', warranty: '', remarks: '',
+    pol: 'Shanghai, China', incoterm: 'CIF', validDays: 15, prefix: 'PI',
+  };
+  const piCfg = {
+    get() { return Object.assign({}, SELLER_DEFAULT, store.get('piSeller', {})); },
+    set(v) { store.set('piSeller', v); },
+  };
+
+  const PI_T = {
+    en: {
+      title: 'PROFORMA INVOICE', no: 'PI No.', date: 'Date', valid: 'Valid until', seller: 'Seller', buyer: 'Buyer',
+      desc: 'Description', color: 'Color', qty: 'Qty', unit: 'Unit price', amount: 'Amount',
+      term: 'Trade term', pol: 'Port of loading', pod: 'Port of destination',
+      subtotal: 'Subtotal', freight: 'Freight', insurance: 'Insurance', discount: 'Discount', total: 'TOTAL',
+      terms: 'Terms', payment: 'Payment', delivery: 'Delivery', warranty: 'Warranty', remarks: 'Remarks',
+      bank: 'Bank information', beneficiary: 'Beneficiary', bankName: 'Bank', bankAddr: 'Bank address', swift: 'SWIFT', account: 'Account No.',
+      contact: 'Contact', sign: 'Authorized signature', included: 'Included',
+      note: 'Prices are valid until the date above. Local taxes and customs duties at destination are paid by the buyer.',
+    },
+    es: {
+      title: 'FACTURA PROFORMA', no: 'N.º PI', date: 'Fecha', valid: 'Válida hasta', seller: 'Vendedor', buyer: 'Comprador',
+      desc: 'Descripción', color: 'Color', qty: 'Cant.', unit: 'Precio unitario', amount: 'Importe',
+      term: 'Incoterm', pol: 'Puerto de carga', pod: 'Puerto de destino',
+      subtotal: 'Subtotal', freight: 'Flete', insurance: 'Seguro', discount: 'Descuento', total: 'TOTAL',
+      terms: 'Condiciones', payment: 'Pago', delivery: 'Entrega', warranty: 'Garantía', remarks: 'Observaciones',
+      bank: 'Información bancaria', beneficiary: 'Beneficiario', bankName: 'Banco', bankAddr: 'Dirección del banco', swift: 'SWIFT', account: 'N.º de cuenta',
+      contact: 'Contacto', sign: 'Firma autorizada', included: 'Incluido',
+      note: 'Los precios son válidos hasta la fecha indicada. Los impuestos y aranceles locales en destino corren por cuenta del comprador.',
+    },
+  };
+
+  /* ---------- 金额大写（英文 / 西班牙文） ---------- */
+  function wordsEn(n) {
+    const a = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+    const t = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+    const lt1000 = (x) => {
+      let s = '';
+      if (x >= 100) { s += a[Math.floor(x / 100)] + ' Hundred'; x %= 100; if (x) s += ' '; }
+      if (x >= 20) { s += t[Math.floor(x / 10)]; if (x % 10) s += '-' + a[x % 10]; } else if (x) s += a[x];
+      return s;
+    };
+    if (n === 0) return 'Zero';
+    const parts = [];
+    [[1e9, 'Billion'], [1e6, 'Million'], [1e3, 'Thousand'], [1, '']].forEach(([u, w]) => {
+      const q = Math.floor(n / u); n %= u;
+      if (q) parts.push(lt1000(q) + (w ? ' ' + w : ''));
+    });
+    return parts.join(' ');
+  }
+  function wordsEs(n) {
+    const u = ['', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidós', 'veintitrés', 'veinticuatro', 'veinticinco', 'veintiséis', 'veintisiete', 'veintiocho', 'veintinueve'];
+    const d = ['', '', '', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+    const c = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+    const lt100 = (x) => (x < 30 ? u[x] : d[Math.floor(x / 10)] + (x % 10 ? ' y ' + u[x % 10] : ''));
+    const lt1000 = (x) => {
+      if (x === 100) return 'cien';
+      const h = Math.floor(x / 100), r = x % 100;
+      return [c[h], r ? lt100(r) : ''].filter(Boolean).join(' ');
+    };
+    if (n === 0) return 'cero';
+    let s = [];
+    const mil = Math.floor(n / 1e6), th = Math.floor((n % 1e6) / 1000), rest = n % 1000;
+    if (mil) s.push(mil === 1 ? 'un millón' : lt1000(mil).replace(/veintiuno$/, 'veintiún').replace(/uno$/, 'un') + ' millones');
+    if (th) s.push(th === 1 ? 'mil' : lt1000(th).replace(/veintiuno$/, 'veintiún').replace(/uno$/, 'un') + ' mil');
+    if (rest) s.push(lt1000(rest));
+    return s.join(' ');
+  }
+  function amountWords(total, lang, cur) {
+    const whole = Math.floor(total + 1e-9), cents = Math.round((total - whole) * 100);
+    if (lang === 'es') {
+      // 名词前：uno→un，veintiuno→veintiún；整百万后加 de
+      let w = wordsEs(whole).replace(/veintiuno$/, 'veintiún').replace(/uno$/, 'un');
+      if (/(millón|millones)$/.test(w)) w += ' de';
+      const unit = cur === 'USD' ? (whole === 1 ? 'dólar estadounidense' : 'dólares estadounidenses') : cur;
+      return 'Son: ' + w.charAt(0).toUpperCase() + w.slice(1) + ' ' + unit + ' con ' + String(cents).padStart(2, '0') + '/100.';
+    }
+    return 'Say ' + (cur === 'USD' ? 'US Dollars' : cur) + ' ' + wordsEn(whole) + (cents ? ' and Cents ' + wordsEn(cents) : '') + ' Only.';
+  }
+
+  const num = (v) => { const x = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return isNaN(x) ? null : x; };
+  const money = (v) => (v == null ? '' : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const fmtDate = (d, lang) => d.toLocaleDateString(lang === 'es' ? 'es-ES' : 'en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+
+  function piTotals(pi) {
+    const subtotal = pi.items.reduce((s, it) => s + (num(it.qty) || 0) * (num(it.price) || 0), 0);
+    const f = num(pi.freight), ins = num(pi.insurance), dis = num(pi.discount);
+    return { subtotal, freight: f, insurance: ins, discount: dis, total: subtotal + (f || 0) + (ins || 0) - (dis || 0) };
+  }
+
+  function nextPiNo() {
+    const cfg = piCfg.get();
+    const d = new Date();
+    const ds = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    const seq = store.get('piSeq', {});
+    const n = (seq[ds] || 0) + 1;
+    return { no: (cfg.prefix || 'PI') + '-' + ds + '-' + String(n).padStart(3, '0'), ds, n };
+  }
+  function commitPiNo(no) {
+    const m = no.match(/-(\d{8})-(\d+)$/);
+    if (!m) return;
+    const seq = store.get('piSeq', {});
+    seq[m[1]] = Math.max(seq[m[1]] || 0, parseInt(m[2], 10));
+    store.set('piSeq', seq);
+  }
+
+  /* ---------- 渲染 PI（客户看到的样子；全部内联样式，避免受 WhatsApp 样式影响） ---------- */
+  function renderPiPage(pi, cfg) {
+    const T = PI_T[pi.lang] || PI_T.en;
+    const NAVY = '#0f2a44', GRAY = '#52606d', LIGHT = '#7b8794', LINE = '#e4e7eb';
+    const lab = (t) => h('span', { style: 'font-size:10px;letter-spacing:.06em;color:' + LIGHT + ';text-transform:uppercase' }, t);
+    const box = (title, ...kids) => h('div', { style: 'border:1px solid ' + LINE + ';border-radius:4px;padding:10px 12px' },
+      h('div', { style: 'margin-bottom:4px' }, lab(title)), ...kids);
+    const line = (k, v) => (v ? h('div', null, h('b', null, k + ': '), String(v)) : null);
+    const tot = piTotals(pi);
+    const cur = pi.currency || 'USD';
+    const date = new Date(pi.dateTs || Date.now());
+    const valid = new Date(date.getTime() + (num(pi.validDays) || 15) * 86400000);
+
+    const page = h('div', { style: 'all:initial;display:block;box-sizing:border-box;width:794px;min-height:1123px;background:#fff;color:#1f2933;' +
+      'font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;padding:40px 44px;position:relative' });
+
+    // 顶部
+    page.appendChild(h('div', { style: 'display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ' + NAVY + ';padding-bottom:14px' },
+      h('div', { style: 'display:flex;gap:12px;align-items:center;max-width:430px' },
+        cfg.logo ? h('img', { src: cfg.logo, style: 'width:56px;height:56px;object-fit:contain' }) : null,
+        h('div', null,
+          h('div', { style: 'font-size:16px;font-weight:700;color:' + NAVY }, cfg.name),
+          cfg.nameCn ? h('div', { style: 'color:' + GRAY }, cfg.nameCn) : null,
+          h('div', { style: 'color:' + GRAY + ';font-size:11px' }, cfg.address),
+          h('div', { style: 'color:' + GRAY + ';font-size:11px' }, [cfg.phone, cfg.email, cfg.web].filter(Boolean).join(' · ')))),
+      h('div', { style: 'text-align:right' },
+        h('div', { style: 'font-size:24px;font-weight:700;letter-spacing:.04em;color:' + NAVY }, T.title),
+        h('table', { style: 'margin-left:auto;margin-top:4px;border-collapse:collapse' },
+          h('tr', null, h('td', { style: 'padding-right:10px' }, lab(T.no)), h('td', { style: 'font-weight:700' }, pi.no)),
+          h('tr', null, h('td', { style: 'padding-right:10px' }, lab(T.date)), h('td', null, fmtDate(date, pi.lang))),
+          h('tr', null, h('td', { style: 'padding-right:10px' }, lab(T.valid)), h('td', null, fmtDate(valid, pi.lang)))))));
+
+    // 买卖双方
+    const b = pi.buyer || {};
+    page.appendChild(h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0' },
+      box(T.seller, h('div', { style: 'font-weight:700' }, cfg.name),
+        cfg.contact ? h('div', { style: 'color:' + GRAY }, T.contact + ': ' + cfg.contact) : null,
+        cfg.phone ? h('div', { style: 'color:' + GRAY }, cfg.phone) : null),
+      box(T.buyer, h('div', { style: 'font-weight:700' }, [b.name, b.company].filter(Boolean).join(' · ') || '-'),
+        h('div', { style: 'color:' + GRAY }, [b.address, b.city, b.country].filter(Boolean).join(', ')),
+        h('div', { style: 'color:' + GRAY }, [b.phone, b.email].filter(Boolean).join(' · ')))));
+
+    // 明细表
+    const th = (t, right, w) => h('th', { style: 'background:' + NAVY + ';color:#fff;font-weight:500;font-size:11px;padding:8px;text-align:' + (right ? 'right' : 'left') + (w ? ';width:' + w : '') }, t);
+    const td = (c, right, bold) => h('td', { style: 'padding:10px 8px;border-bottom:1px solid ' + LINE + ';vertical-align:top;text-align:' + (right ? 'right' : 'left') + (bold ? ';font-weight:700' : '') }, c);
+    const table = h('table', { style: 'width:100%;border-collapse:collapse' },
+      h('tr', null, th('#', false, '28px'), th(T.desc), th(T.color, false, '80px'), th(T.qty, true, '44px'), th(T.unit, true, '96px'), th(T.amount, true, '104px')));
+    pi.items.forEach((it, i) => {
+      const q = num(it.qty) || 0, p = num(it.price);
+      table.appendChild(h('tr', null,
+        td(String(i + 1)),
+        td(h('div', null, h('div', { style: 'font-weight:700' }, it.model || ''), it.spec ? h('div', { style: 'color:' + GRAY }, it.spec) : null)),
+        td(it.color || ''), td(String(q), true), td(money(p), true), td(money(p == null ? null : p * q), true, true)));
+    });
+    page.appendChild(table);
+
+    // 条款 + 汇总
+    const sumRow = (k, v) => h('tr', null, h('td', { style: 'color:' + GRAY + ';padding:3px 0' }, k), h('td', { style: 'text-align:right' }, v));
+    const fv = (raw, n) => (n != null ? money(n) : (raw ? (/includ|incluid/i.test(raw) ? T.included : String(raw)) : null));
+    const sumTable = h('table', { style: 'width:260px;border-collapse:collapse' }, sumRow(T.subtotal, money(tot.subtotal)));
+    [[T.freight, fv(pi.freight, tot.freight)], [T.insurance, fv(pi.insurance, tot.insurance)], [T.discount, tot.discount ? '-' + money(tot.discount) : null]]
+      .forEach(([k, v]) => { if (v) sumTable.appendChild(sumRow(k, v)); });
+    sumTable.appendChild(h('tr', null, h('td', { colspan: '2', style: 'padding:0' },
+      h('div', { style: 'background:' + NAVY + ';color:#fff;border-radius:4px;padding:9px 12px;margin-top:6px;display:flex;justify-content:space-between;align-items:baseline' },
+        h('span', { style: 'font-size:10px;letter-spacing:.06em' }, T.total + ' (' + cur + ')'),
+        h('span', { style: 'font-size:18px;font-weight:700' }, money(tot.total))))));
+    page.appendChild(h('div', { style: 'display:flex;justify-content:space-between;gap:16px;margin-top:12px' },
+      h('div', { style: 'flex:1;color:' + GRAY },
+        pi.incoterm ? h('div', null, lab(T.term), ' ' + pi.incoterm + (pi.pod ? ' ' + pi.pod : '')) : null,
+        pi.pol ? h('div', null, lab(T.pol), ' ' + pi.pol) : null,
+        h('div', { style: 'margin-top:6px;font-style:italic' }, amountWords(tot.total, pi.lang, cur))),
+      sumTable));
+
+    page.appendChild(h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px' },
+      box(T.terms, line(T.payment, pi.payment), line(T.delivery, pi.delivery), line(T.warranty, pi.warranty), line(T.remarks, pi.remarks)),
+      box(T.bank, line(T.beneficiary, cfg.bankBeneficiary), line(T.bankName, cfg.bankName), line(T.bankAddr, cfg.bankAddress),
+        line(T.swift, cfg.bankSwift), line(T.account, cfg.bankAccount))));
+
+    page.appendChild(h('div', { style: 'display:flex;justify-content:space-between;align-items:flex-end;margin-top:26px' },
+      h('div', { style: 'color:' + LIGHT + ';font-size:10px;max-width:380px' }, T.note),
+      h('div', { style: 'text-align:center;width:200px;position:relative' },
+        cfg.seal ? h('img', { src: cfg.seal, style: 'width:120px;height:120px;object-fit:contain;display:block;margin:0 auto -12px;opacity:.92' }) : h('div', { style: 'height:60px' }),
+        h('div', { style: 'border-top:1px solid #1f2933;padding-top:3px;font-size:10px;color:' + GRAY }, T.sign))));
+    return page;
+  }
+
+  /* ---------- 生成 PDF ---------- */
+  async function makePiPdf(pi, cfg) {
+    if (typeof html2canvas !== 'function' || !window.jspdf) throw new Error('PDF 组件没有加载成功，请刷新页面重试');
+    const holder = h('div', { style: 'position:fixed;left:-20000px;top:0;z-index:-1' });
+    const page = renderPiPage(pi, cfg);
+    holder.appendChild(page);
+    document.body.appendChild(holder);
+    try {
+      await Promise.all([...page.querySelectorAll('img')].map((im) => (im.complete ? 0 : new Promise((r) => { im.onload = im.onerror = r; }))));
+      const canvas = await html2canvas(page, { scale: 2, backgroundColor: '#ffffff', logging: false, windowWidth: 794 });
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
+      const pw = 210, ph = 297;
+      const imgH = canvas.height * pw / canvas.width;
+      if (imgH <= ph + 0.5) {
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pw, imgH);
+      } else {
+        // 内容超过一页：按 A4 高度切片
+        const sliceH = Math.floor(canvas.width * ph / pw);
+        for (let y = 0, first = true; y < canvas.height; y += sliceH, first = false) {
+          const c = document.createElement('canvas');
+          c.width = canvas.width; c.height = Math.min(sliceH, canvas.height - y);
+          const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+          ctx.drawImage(canvas, 0, y, c.width, c.height, 0, 0, c.width, c.height);
+          if (!first) pdf.addPage();
+          pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pw, c.height * pw / c.width);
+        }
+      }
+      return pdf.output('blob');
+    } finally {
+      holder.remove();
+    }
+  }
+
+  // 把文件放进 WhatsApp 的发送预览（不会自动发送）
+  async function attachToChat(file) {
+    const el = getInput();
+    if (!el) throw new Error('请先打开客户聊天');
+    el.focus();
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+  }
+
+  // 含中文的字段，翻译成 PI 语言
+  async function localizeFields(pi) {
+    const out = JSON.parse(JSON.stringify(pi));
+    const to = pi.lang === 'es' ? 'es' : 'en';
+    const tr = async (s) => (s && hasChinese(String(s)) ? (await translate(String(s), to)).text : s);
+    for (const k of ['payment', 'delivery', 'warranty', 'remarks', 'pol', 'pod', 'freight', 'insurance']) out[k] = await tr(out[k]);
+    for (const k of Object.keys(out.buyer || {})) out.buyer[k] = await tr(out.buyer[k]);
+    for (const it of out.items) { it.model = await tr(it.model); it.spec = await tr(it.spec); it.color = await tr(it.color); }
+    return out;
+  }
+
+  /* ---------- AI 从聊天提取 ---------- */
+  async function extractPiFromChat(conv, chatName) {
+    const system = [
+      '你帮中国汽车出口经销商从 WhatsApp 聊天中提取形式发票（PI）需要的信息。',
+      '【我方业务】\n' + ai.biz,
+      '【规则】',
+      '- 只提取聊天里明确出现的内容，没有的填 null，不要猜。',
+      '- 单价只取我方在聊天里报过的价格（数字，不带货币符号）；没报过就 null。',
+      '- 文字字段用英文填写；如果客户主要用西班牙语交流，lang 填 "es" 且文字字段用西班牙语，否则 lang 填 "en"。',
+      '- 只输出 JSON：{"lang":"en|es","buyer":{"name":null,"company":null,"address":null,"city":null,"country":null,"phone":null,"email":null},' +
+        '"items":[{"model":"品牌车型，如 Chery RELY R8","spec":"配置：发动机/燃料/变速箱/驱动/年款等","color":null,"qty":1,"price":null}],' +
+        '"currency":"USD","incoterm":"CIF/FOB/EXW 等，没有则 null","pol":"起运港","pod":"目的港",' +
+        '"freight":"运费数字，或 included，或 null","insurance":"保险费数字，或 included，或 null","payment":null,"delivery":null,"remarks":null}',
+    ].join('\n');
+    const { json } = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: convText(conv, chatName) }], 1200);
+    return json || {};
+  }
+
+  function blankPi(chatName) {
+    const cfg = piCfg.get();
+    const phoneLike = /^\+?[\d\s\-()]{7,}$/.test(chatName || '');
+    return {
+      lang: 'en', no: nextPiNo().no, dateTs: Date.now(), validDays: cfg.validDays || 15, currency: 'USD',
+      buyer: { name: phoneLike ? '' : (chatName || ''), company: '', address: '', city: '', country: '', phone: phoneLike ? chatName : '', email: '' },
+      items: [{ model: '', spec: '', color: '', qty: 1, price: '' }],
+      incoterm: cfg.incoterm || '', pol: cfg.pol || '', pod: '', freight: '', insurance: '', discount: '',
+      payment: cfg.payment || '', delivery: cfg.delivery || '', warranty: cfg.warranty || '', remarks: cfg.remarks || '',
+    };
+  }
+  function mergeExtracted(pi, x) {
+    const pick = (v) => (v == null || v === '' || /^null|unknown|未知$/i.test(String(v)) ? '' : v);
+    if (x.lang === 'es' || x.lang === 'en') pi.lang = x.lang;
+    const xb = x.buyer || {};
+    Object.keys(pi.buyer).forEach((k) => { const v = pick(xb[k]); if (v) pi.buyer[k] = String(v); });
+    if (Array.isArray(x.items) && x.items.length) {
+      pi.items = x.items.map((it) => ({ model: pick(it.model), spec: pick(it.spec), color: pick(it.color), qty: pick(it.qty) || 1, price: pick(it.price) }));
+    }
+    ['currency', 'incoterm', 'pol', 'pod', 'freight', 'insurance', 'payment', 'delivery', 'remarks'].forEach((k) => { const v = pick(x[k]); if (v) pi[k] = String(v); });
+    return pi;
+  }
+
+  /* ---------- PI 编辑界面（右栏） ---------- */
+  async function openPI(fresh) {
+    const chatName = getChatName();
+    if (!chatName) { toast('请先打开客户聊天', true); return; }
+    panelChat = chatName;
+    panelView = 'pi';
+    const drafts = store.get('piDrafts', {});
+    if (drafts[chatName] && !fresh) { renderPiEditor(drafts[chatName], false); return; }
+    let pi = blankPi(chatName);
+    if (!ai.apiKey) { renderPiEditor(pi, true); toast('没有填 DeepSeek Key，只能手动填写', true); return; }
+    showPanel(h('div', { class: 'wp-muted', style: 'padding:24px 0;text-align:center' }, 'AI 正在从聊天中提取 PI 信息…'), '生成 PI');
+    try {
+      pi = mergeExtracted(pi, await extractPiFromChat(readConversation(80), chatName));
+    } catch (e) { toast('提取失败：' + e.message + '，请手动填写', true); }
+    if (getChatName() === chatName && panelView === 'pi') renderPiEditor(pi, true);
+  }
+
+  function renderPiEditor(pi, isNew) {
+    const chatName = getChatName();
+    const save = () => { const d = store.get('piDrafts', {}); d[chatName] = pi; store.set('piDrafts', d); };
+    const field = (label, obj, key, opts) => {
+      opts = opts || {};
+      const inp = h(opts.area ? 'textarea' : 'input', { class: 'pi-in', rows: opts.area ? '2' : null, placeholder: opts.ph || '' });
+      if (!opts.area) inp.type = 'text';
+      inp.value = obj[key] == null ? '' : obj[key];
+      const mark = () => inp.classList.toggle('pi-miss', !String(inp.value).trim() && !opts.optional);
+      inp.addEventListener('input', () => { obj[key] = inp.value; mark(); save(); refreshTotal(); });
+      mark();
+      return h('label', { class: 'pi-f' + (opts.half ? ' half' : '') }, h('span', null, label), inp);
+    };
+    const totalEl = h('div', { class: 'pi-total' });
+    const refreshTotal = () => { const t = piTotals(pi); totalEl.textContent = '合计 ' + (pi.currency || 'USD') + ' ' + money(t.total); };
+
+    const itemsBox = h('div');
+    const renderItems = () => {
+      itemsBox.innerHTML = '';
+      pi.items.forEach((it, i) => {
+        itemsBox.appendChild(h('div', { class: 'pi-item' },
+          h('div', { class: 'pi-item-h' }, h('b', null, '车辆 ' + (i + 1)),
+            pi.items.length > 1 ? h('button', { class: 'sec', onclick: () => { pi.items.splice(i, 1); save(); renderItems(); refreshTotal(); } }, '删除') : null),
+          field('车型', it, 'model', { ph: 'Chery RELY R8' }),
+          field('配置', it, 'spec', { ph: '2.0T Diesel · 8AT · 4x4 · 2026', optional: false }),
+          h('div', { class: 'pi-row' },
+            field('颜色', it, 'color', { half: true }),
+            field('数量', it, 'qty', { half: true })),
+          field('单价', it, 'price', { ph: '25000' })));
+      });
+      itemsBox.appendChild(h('button', { class: 'sec', onclick: () => { pi.items.push({ model: '', spec: '', color: '', qty: 1, price: '' }); save(); renderItems(); } }, '+ 添加车辆'));
+    };
+    renderItems();
+    refreshTotal();
+
+    const langSel = h('select', { class: 'pi-in' }, h('option', { value: 'en' }, 'English 英文版'), h('option', { value: 'es' }, 'Español 西班牙语版'));
+    langSel.value = pi.lang || 'en';
+    langSel.addEventListener('change', () => { pi.lang = langSel.value; save(); });
+
+    const busyBtn = (btn, fn) => async () => {
+      const old = btn.textContent; btn.disabled = true; btn.textContent = '处理中…';
+      try { await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = old; }
+    };
+    const build = async () => {
+      const cfg = piCfg.get();
+      if (!cfg.bankAccount || !cfg.bankName) toast('提醒：设置里还没填银行信息', true);
+      const loc = await localizeFields(pi);
+      const blob = await makePiPdf(loc, cfg);
+      const safe = (pi.buyer.name || pi.buyer.phone || 'customer').replace(/[^\w\-]+/g, '_').slice(0, 40);
+      return new File([blob], pi.no + '_' + safe + '.pdf', { type: 'application/pdf' });
+    };
+    const recordSent = () => {
+      commitPiNo(pi.no);
+      const rec = store.get('piRecords', []);
+      rec.push({ no: pi.no, chat: chatName, at: Date.now(), total: piTotals(pi).total, currency: pi.currency || 'USD', lang: pi.lang });
+      store.set('piRecords', rec.slice(-500));
+      save();
+    };
+    const previewBtn = h('button', { class: 'sec' }, '预览');
+    previewBtn.onclick = busyBtn(previewBtn, async () => { showPiPreview(renderPiPage(await localizeFields(pi), piCfg.get())); });
+    const sendBtn = h('button', null, '生成 PDF 并放进聊天');
+    sendBtn.onclick = busyBtn(sendBtn, async () => {
+      const file = await build();
+      await attachToChat(file);
+      recordSent();
+      toast('PDF 已放进发送预览，确认后点发送');
+    });
+    const dlBtn = h('button', { class: 'sec' }, '下载 PDF');
+    dlBtn.onclick = busyBtn(dlBtn, async () => {
+      const file = await build();
+      const a = h('a', { href: URL.createObjectURL(file), download: file.name });
+      document.body.appendChild(a); a.click(); a.remove();
+      recordSent();
+    });
+
+    const b = pi.buyer;
+    const box = h('div', { class: 'pi-ed' },
+      h('div', { class: 'wp-muted' }, (isNew ? 'AI 已从聊天中提取，' : '这是上次保存的 PI，') + '黄色框是需要你补充的内容。中文也可以，生成时会自动翻译。'),
+      h('div', { class: 'pi-row' }, field('PI 编号', pi, 'no', { half: true }), h('label', { class: 'pi-f half' }, h('span', null, '语言'), langSel)),
+      h('div', { class: 'wp-sec' }, '买方'),
+      field('姓名', b, 'name'), field('公司（可选）', b, 'company', { optional: true }),
+      field('地址', b, 'address'),
+      h('div', { class: 'pi-row' }, field('城市', b, 'city', { half: true }), field('国家', b, 'country', { half: true })),
+      h('div', { class: 'pi-row' }, field('电话/WhatsApp', b, 'phone', { half: true }), field('邮箱（可选）', b, 'email', { half: true, optional: true })),
+      h('div', { class: 'wp-sec' }, '车辆明细'), itemsBox,
+      h('div', { class: 'wp-sec' }, '价格条款'),
+      h('div', { class: 'pi-row' }, field('币种', pi, 'currency', { half: true }), field('贸易术语', pi, 'incoterm', { half: true, ph: 'CIF' })),
+      h('div', { class: 'pi-row' }, field('起运港', pi, 'pol', { half: true }), field('目的港', pi, 'pod', { half: true, ph: 'Belize City' })),
+      h('div', { class: 'pi-row' }, field('运费', pi, 'freight', { half: true, optional: true, ph: '数字或 included' }), field('保险费', pi, 'insurance', { half: true, optional: true, ph: '数字或 included' })),
+      h('div', { class: 'pi-row' }, field('折扣', pi, 'discount', { half: true, optional: true }), field('有效天数', pi, 'validDays', { half: true })),
+      totalEl,
+      h('div', { class: 'wp-sec' }, '条款'),
+      field('付款方式', pi, 'payment', { area: true }), field('交期', pi, 'delivery', { area: true }),
+      field('质保', pi, 'warranty', { area: true, optional: true }), field('备注', pi, 'remarks', { area: true, optional: true }),
+      h('div', { class: 'wp-foot pi-actions' }, sendBtn, previewBtn, dlBtn),
+      h('div', { class: 'wp-foot' },
+        h('button', { class: 'sec', onclick: () => { if (confirmInline(box, '重新从聊天提取会覆盖当前内容')) openPI(true); } }, '重新从聊天提取'),
+        h('button', { class: 'sec', onclick: () => { pi.no = nextPiNo().no; pi.dateTs = Date.now(); save(); renderPiEditor(pi, false); toast('已换新编号 ' + pi.no); } }, '新编号（改版重发）'),
+        h('button', { class: 'sec', onclick: backToResult }, '← 返回分析')));
+    save();
+    showPanel(box, '生成 PI');
+  }
+  // 简单的二次确认：第一次点提示，3 秒内再点才执行
+  let confirmAt = 0;
+  function confirmInline(_box, msg) {
+    if (Date.now() - confirmAt < 3000) { confirmAt = 0; return true; }
+    confirmAt = Date.now(); toast(msg + '，再点一次确认'); return false;
+  }
+
+  const piModal = h('div', { id: 'wat-pi-modal' });
+  document.documentElement.appendChild(piModal);
+  function showPiPreview(page) {
+    piModal.innerHTML = '';
+    const scale = Math.min(1, (window.innerHeight - 80) / 1123);
+    const wrap = h('div', { style: 'transform:scale(' + scale + ');transform-origin:top center;box-shadow:0 8px 30px rgba(0,0,0,.3)' }, page);
+    piModal.appendChild(h('div', { class: 'pim-bar' }, h('span', null, 'PI 预览（客户看到的样子）'), h('button', { onclick: () => { piModal.style.display = 'none'; } }, '关闭')));
+    piModal.appendChild(h('div', { style: 'height:' + Math.ceil(1123 * scale) + 'px;display:flex;justify-content:center' }, wrap));
+    piModal.style.display = 'block';
+  }
+
+  /* ---------- PI 设置 ---------- */
+  function piSettingsSection() {
+    const cfg = piCfg.get();
+    const inputs = {};
+    const f = (label, key, opts) => {
+      opts = opts || {};
+      const el = h(opts.area ? 'textarea' : 'input', { rows: opts.area ? '2' : null, placeholder: opts.ph || '', autocomplete: 'off' });
+      if (!opts.area) el.type = 'text';
+      el.value = cfg[key] == null ? '' : cfg[key];
+      inputs[key] = el;
+      return h('div', null, h('label', null, label), el);
+    };
+    const imgField = (label, key) => {
+      const prev = h('img', { style: 'max-width:90px;max-height:90px;display:' + (cfg[key] ? 'block' : 'none') + ';margin-top:4px' });
+      if (cfg[key]) prev.src = cfg[key];
+      const file = h('input', { type: 'file', accept: 'image/*' });
+      file.addEventListener('change', () => {
+        const fl = file.files[0]; if (!fl) return;
+        const rd = new FileReader();
+        rd.onload = () => { cfg[key] = rd.result; prev.src = rd.result; prev.style.display = 'block'; };
+        rd.readAsDataURL(fl);
+      });
+      const clear = h('button', { class: 'sec', onclick: () => { cfg[key] = ''; prev.style.display = 'none'; } }, '清除');
+      return h('div', null, h('label', null, label), h('div', { style: 'display:flex;gap:8px;align-items:center' }, file, clear), prev);
+    };
+    const sec = h('div', { class: 'ws-pi' },
+      h('div', { class: 'wp-sec', style: 'font-size:13px;color:#111b21' }, 'PI 形式发票设置'),
+      f('公司英文名', 'name'), f('公司中文名', 'nameCn'), f('公司地址', 'address', { area: true }),
+      f('电话', 'phone'), f('邮箱', 'email'), f('网站', 'web'), f('联系人（显示在卖方栏）', 'contact'),
+      imgField('Logo（可选）', 'logo'), imgField('公章图片（PNG 透明底效果最好）', 'seal'),
+      f('收款人', 'bankBeneficiary'), f('开户银行', 'bankName'), f('银行地址', 'bankAddress'), f('SWIFT', 'bankSwift'), f('银行账号', 'bankAccount'),
+      f('默认付款方式（可写中文）', 'payment', { area: true, ph: '如：30% T/T 定金，70% 发货前付清' }),
+      f('默认交期（可写中文）', 'delivery', { area: true, ph: '如：收到定金后 30 天内发货' }),
+      f('默认质保（可写中文）', 'warranty', { area: true }),
+      f('默认起运港', 'pol'), f('默认贸易术语', 'incoterm'), f('PI 有效天数', 'validDays'), f('PI 编号前缀', 'prefix'));
+    sec.save = () => {
+      Object.keys(inputs).forEach((k) => { cfg[k] = inputs[k].value.trim(); });
+      cfg.validDays = parseInt(cfg.validDays, 10) || 15;
+      piCfg.set(cfg);
+    };
+    return sec;
   }
 
   /* ---------- 工具栏拖动 / 收起 ---------- */
