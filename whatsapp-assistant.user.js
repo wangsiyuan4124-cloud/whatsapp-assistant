@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.2.0
+// @version      1.3.0
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -423,9 +423,22 @@
   .wat-lv{display:inline-block;font:500 11px/1.5 system-ui,"Microsoft YaHei",sans-serif;padding:0 6px;border-radius:6px;margin-left:6px;vertical-align:middle}
   .wat-lv.big{font-size:13px;padding:2px 8px;margin-left:0}
   .wat-lv-A{background:#d9fdd3;color:#0b6b3a}.wat-lv-B{background:#dbeefc;color:#0b4f7c}.wat-lv-C{background:#fdf0cc;color:#7a5200}.wat-lv-D{background:#e9edef;color:#54656f}
-  #wat-panel{position:fixed;z-index:10002;display:none;right:16px;top:70px;width:340px;max-height:calc(100vh - 210px);overflow:auto;background:#fff;color:#111b21;
-    border:1px solid #d1d7db;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:12px 14px;font:13px/1.55 system-ui,"Microsoft YaHei",sans-serif}
-  #wat-panel button,#wat-settings button{font:inherit;font-size:12px;border:0;border-radius:8px;padding:3px 10px;background:#25d366;color:#fff;cursor:pointer}
+  html.wat-docked #app{width:calc(100% - var(--wat-pw)) !important;max-width:calc(100% - var(--wat-pw)) !important;overflow:hidden !important}
+  html.wat-docked #app > div{width:100% !important;min-width:0 !important}
+  #wat-panel{position:fixed;z-index:10002;display:none;flex-direction:column;right:0;top:0;bottom:0;width:var(--wat-pw);box-sizing:border-box;background:#fff;color:#111b21;
+    border-left:1px solid #d1d7db;font:13px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+  #wat-panel .wp-head{padding:12px 14px 8px;margin:0;border-bottom:1px solid #e9edef}
+  #wat-panel .wp-body{flex:1;overflow:auto;padding:10px 14px 16px}
+  .wr-draft,.wr-ask{width:100%;box-sizing:border-box;border:1px solid #d1d7db;border-radius:8px;padding:6px 8px;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;resize:vertical}
+  .wr-thread{max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:6px;margin-bottom:6px}
+  .wr-me{align-self:flex-end;background:#d9fdd3;border-radius:8px;padding:4px 8px;max-width:85%}
+  .wr-ai{align-self:flex-start;background:#f0f2f5;border-radius:8px;padding:4px 8px;max-width:85%}
+  .wr-err{color:#c62828}
+  .wr-quick{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}
+  #wat-panel button.chip{background:#f0f2f5;color:#3b4a54;border-radius:12px;padding:2px 8px;font-size:11px}
+  .wr-input{display:flex;gap:6px;align-items:flex-end}
+  #wat-panel button:disabled{opacity:.5;cursor:default}
+  #wat-panel button,#wat-settings button{white-space:nowrap;font:inherit;font-size:12px;border:0;border-radius:8px;padding:3px 10px;background:#25d366;color:#fff;cursor:pointer}
   #wat-panel button.sec,#wat-settings button.sec{background:#e9edef;color:#3b4a54}
   .wp-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}.wp-head b{font-size:14px}
   .wp-sub{color:#667781;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -542,7 +555,7 @@
     ['嫌贵/比价', "I understand, it's smart to compare. Which model and version are you comparing with? Specs can differ a lot, and I want you to compare like for like."],
     ['嫌贵/比价', "Thanks for being honest. What price did you get elsewhere? Let me check what I can do for you."],
     ['运费/落地价', "We can ship to your nearest port. Which port or city works best for you? I'll calculate the landed cost for you."],
-    ['付款', "[按实际付款方式修改] We usually work with bank transfer: a deposit to confirm the order and the balance before shipment. Would that work for you?"],
+    ['付款', "Which payment method works best for you? Once I know, I'll prepare the details for you."],
     ['经销商合作', "Thanks! We're looking for partners in your area. Could you tell me a bit about your business — do you have a showroom, and how many cars do you sell per month?"],
     ['经销商合作', "For dealer orders we can offer wholesale pricing and spare parts support. How many units are you planning for the first order?"],
     ['不回复跟进-第1天', "Hi! Just checking if you received the info about the car? Happy to answer any questions 😊"],
@@ -551,6 +564,7 @@
     ['推进成交', "To prepare your proforma invoice, I just need your full name, city and the version/color you prefer. Shall we go ahead?"],
     ['推进成交', "Would you like a quick video call? I can show you the car in detail."],
   ];
+  const PANEL_W = 400;
 
   const ai = {
     get apiKey() { return store.get('dsKey', ''); },
@@ -569,6 +583,9 @@
         pb = SEED_PLAYBOOK.map(([scene, text], i) => ({ id: 'seed' + i, scene, text, seed: true, at: 0 }));
         store.set('playbook', pb);
       }
+      // 旧版种子里那条带"[按实际付款方式修改]"的付款话术，换成不预设条件的问法
+      const old = pb.find((p) => p.id === 'seed7' && /\[按实际/.test(p.text));
+      if (old) { old.text = SEED_PLAYBOOK[7][1]; store.set('playbook', pb); }
       return pb;
     },
     savePlaybook(pb) { store.set('playbook', pb); },
@@ -606,34 +623,42 @@
     return out.slice(-(maxMsgs || 60));
   }
 
-  function buildPrompt(conv, chatName) {
-    const pb = ai.playbook();
+  // 公共背景：业务、分级标准、价格与条款、话术库、硬规则
+  function baseContext() {
+    const pb = ai.playbook().filter((p) => !/\[[^\]]*\]/.test(p.text)); // 带方括号备注的话术不交给 AI
     const pbSorted = pb.slice().sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 40);
     const prices = ai.prices.trim();
-    const system = [
-      '你是一名资深的外贸汽车销售顾问，帮助中国经销商分析 WhatsApp 客户并给出回复建议。',
+    return [
+      '你是一名资深的外贸汽车销售顾问，帮助中国经销商处理 WhatsApp 客户。',
       '【我方业务】\n' + ai.biz,
       '【客户分级标准】\n' + ai.rules,
-      '【价格表】\n' + (prices || '（暂无。不要给出任何具体价格、优惠或交期数字。）'),
-      '【话术库（参考风格和推进思路，可改写，不要照抄方括号里的备注）】\n' +
-        pbSorted.map((p) => '- [' + p.scene + '] ' + p.text).join('\n'),
-      '【规则】',
+      '【价格表与交易条款】\n' + (prices || '（暂无。）'),
+      '【话术库（参考风格和推进思路，可改写）】\n' + pbSorted.map((p) => '- [' + p.scene + '] ' + p.text).join('\n'),
+      '【硬规则】',
+      '- 价格、优惠、付款方式、定金比例、交期、船期、库存、质保等具体条件，只能来自上面的【我方业务】和【价格表与交易条款】，或者聊天记录里我方已经说过的内容。没有依据的一律不要写，改为向客户提问或说明会尽快确认。',
+      '- 回复用客户使用的语言，像 WhatsApp 聊天一样简短自然。',
+    ].join('\n\n');
+  }
+  function convText(conv, chatName) {
+    return '客户：' + (chatName || '未知') + '\n聊天记录（按时间顺序）：\n' +
+      conv.map((m) => (m.time ? '[' + m.time + '] ' : '') + m.from + '：' + m.text).join('\n');
+  }
+
+  function buildPrompt(conv, chatName) {
+    const system = baseContext() + '\n\n' + [
+      '【本次任务：分析客户并给出回复建议】',
       '1. 只根据聊天内容判断，没提到的信息填"未知"，不要猜。',
-      '2. 价格、优惠、交期、库存等具体数字只能来自价格表；价格表里没有的，回复里不要编数字，改为追问细节或说明会尽快报价。',
-      '3. 建议回复用客户使用的语言，像 WhatsApp 聊天一样简短自然（每条不超过 60 个单词），每条都要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。',
-      '4. 给 2～3 条思路不同的建议回复。如果最后一条是我方发的、客户还没回，就给跟进话术。',
-      '5. 只输出 JSON，不要任何其他文字。格式：',
+      '2. 给 2～3 条思路不同的建议回复（每条不超过 60 个单词），每条都要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。如果最后一条是我方发的、客户还没回，就给跟进话术。',
+      '3. 只输出 JSON，不要任何其他文字。格式：',
       '{"level":"A|B|C|D","customer_type":"个人|经销商|未知","language":"客户语言，如 English/Español",' +
         '"reason":"一句话中文理由","known":{"国家":"","车型":"","数量":"","预算":"","付款方式":"","购买时间":""},' +
         '"missing":["还缺的关键信息，中文"],"suggestions":[{"scene":"场景，中文","goal":"这条回复的目的，中文","reply":"客户语言的回复原文","reply_zh":"中文意思"}],' +
         '"next_followup":{"when":"建议跟进时间，如 明天上午","action":"中文，跟进做什么"}}',
-    ].join('\n\n');
-    const user = '客户：' + (chatName || '未知') + '\n聊天记录（按时间顺序）：\n' +
-      conv.map((m) => (m.time ? '[' + m.time + '] ' : '') + m.from + '：' + m.text).join('\n');
-    return { system, user };
+    ].join('\n');
+    return { system, user: convText(conv, chatName) };
   }
 
-  function callDeepSeek(system, user) {
+  function callDeepSeek(messages, maxTokens) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'POST',
@@ -641,10 +666,10 @@
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ai.apiKey },
         data: JSON.stringify({
           model: 'deepseek-chat',
-          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          messages,
           response_format: { type: 'json_object' },
           temperature: 0.4,
-          max_tokens: 1500,
+          max_tokens: maxTokens || 1500,
         }),
         timeout: 90000,
         onload: (r) => {
@@ -654,7 +679,7 @@
           try {
             const data = JSON.parse(r.responseText);
             const txt = data.choices[0].message.content;
-            resolve(JSON.parse(txt.replace(/^```(json)?|```$/g, '').trim()));
+            resolve({ json: JSON.parse(txt.replace(/^```(json)?|```$/g, '').trim()), raw: txt });
           } catch (e) { reject(new Error('AI 返回的内容无法解析，请重试')); }
         },
         onerror: () => reject(new Error('连不上 DeepSeek，请检查网络')),
@@ -701,10 +726,14 @@
     const m = (li.innerText || '').trim().match(/^([ABCD])(?:\s|级|$)/i);
     return m ? m[1].toUpperCase() : null;
   };
-  async function applyLevelList(level) {
+  // chatName：开始时的聊天；中途发现切换了聊天就立即停止，避免标错人
+  async function applyLevelList(level, chatName) {
+    const stillSame = () => getChatName() === chatName;
     for (let round = 0; round < 6; round++) {
+      if (!stillSame()) { closeMenu(); return { ok: false, msg: '聊天已切换，已停止加入列表，请回到该客户重新分析' }; }
       const menu = await openListMenu();
       if (!menu) return { ok: false, msg: '没找到「添加到列表」按钮' };
+      if (!stillSame()) { closeMenu(); return { ok: false, msg: '聊天已切换，已停止加入列表，请回到该客户重新分析' }; }
       const items = [...menu.querySelectorAll('[role="menuitemcheckbox"]')].filter(levelOfItem);
       if (!items.length) { closeMenu(); return { ok: false, msg: '没找到 A/B/C/D 列表，请先在 WhatsApp 里建好' }; }
       const wrong = items.find((li) => (levelOfItem(li) === level) !== (li.getAttribute('aria-checked') === 'true'));
@@ -715,10 +744,10 @@
       await sleep(250);
     }
     closeMenu();
-    return { ok: false, msg: '打标签没有成功，请手动加入列表' };
+    return { ok: false, msg: '加入列表没有成功，请手动加入' };
   }
 
-  /* ---------- 分析面板 ---------- */
+  /* ---------- 右侧第三栏 ---------- */
   const h = (tag, attrs, ...kids) => {
     const el = document.createElement(tag);
     if (attrs) for (const k in attrs) {
@@ -733,16 +762,39 @@
 
   const panel = h('div', { id: 'wat-panel' });
   document.documentElement.appendChild(panel);
+  document.documentElement.style.setProperty('--wat-pw', PANEL_W + 'px');
   let panelChat = '';
+  let panelView = 'result'; // result | refine
 
-  function showPanel(content) {
+  function dock(on) {
+    document.documentElement.classList.toggle('wat-docked', on);
+    panel.style.display = on ? 'flex' : 'none';
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  function showPanel(content, title) {
     panel.innerHTML = '';
     panel.appendChild(h('div', { class: 'wp-head' },
-      h('b', null, '客户分析'),
+      h('b', null, title || '客户分析'),
       h('span', { class: 'wp-sub' }, panelChat),
-      h('button', { class: 'wp-x', title: '关闭', onclick: () => { panel.style.display = 'none'; } }, '×')));
-    panel.appendChild(content);
-    panel.style.display = 'block';
+      h('button', { class: 'wp-x', title: '关闭', onclick: () => dock(false) }, '×')));
+    panel.appendChild(h('div', { class: 'wp-body' }, content));
+    dock(true);
+  }
+
+  async function fillInput(text) {
+    const el = getInput();
+    if (!el) { toast('请先打开聊天', true); return; }
+    if (await replaceInputText(el, String(text))) { lastTranslated = getInputText(el); el.focus(); toast('已填入输入框，检查后按回车发送'); }
+    else toast('填入失败，请手动复制', true);
+  }
+  function savePb(text, zh, scene, level, btn) {
+    const pb = ai.playbook();
+    if (pb.some((p) => p.text === text)) { toast('话术库里已经有这条了'); return; }
+    pb.push({ id: 'u' + Date.now(), scene: scene || '自定义', text, zh: zh || '', level: level || '', at: Date.now() });
+    ai.savePlaybook(pb);
+    if (btn) btn.textContent = '已收藏';
+    toast('已收藏到话术库（共 ' + pb.length + ' 条）');
   }
 
   function renderResult(r, at) {
@@ -765,25 +817,14 @@
     box.appendChild(h('div', { class: 'wp-sec' }, '建议回复'));
     if (!r.suggestions.length) box.appendChild(h('div', { class: 'wp-muted' }, 'AI 没有给出建议，请重试'));
     r.suggestions.forEach((s) => {
-      const saveBtn = h('button', { class: 'sec', onclick: () => {
-        const pb = ai.playbook();
-        if (pb.some((p) => p.text === s.reply)) { toast('话术库里已经有这条了'); return; }
-        pb.push({ id: 'u' + Date.now(), scene: s.scene || '自定义', text: s.reply, zh: s.reply_zh || '', level: r.level, at: Date.now() });
-        ai.savePlaybook(pb);
-        saveBtn.textContent = '已收藏';
-        toast('已收藏到话术库（共 ' + pb.length + ' 条）');
-      } }, '☆ 收藏');
+      const saveBtn = h('button', { class: 'sec', onclick: () => savePb(s.reply, s.reply_zh, s.scene, r.level, saveBtn) }, '☆ 收藏');
       box.appendChild(h('div', { class: 'wp-sug' },
         h('div', { class: 'wp-goal' }, (s.scene ? '【' + s.scene + '】' : '') + (s.goal || '')),
         h('div', { class: 'wp-reply' }, String(s.reply)),
         s.reply_zh ? h('div', { class: 'wp-zh' }, '中文：' + s.reply_zh) : null,
         h('div', { class: 'wp-btns' },
-          h('button', { onclick: async () => {
-            const el = getInput();
-            if (!el) { toast('请先打开聊天', true); return; }
-            if (await replaceInputText(el, String(s.reply))) { lastTranslated = getInputText(el); el.focus(); toast('已填入输入框，检查后按回车发送'); }
-            else toast('填入失败，请手动复制', true);
-          } }, '填入'),
+          h('button', { onclick: () => fillInput(s.reply) }, '填入'),
+          h('button', { class: 'sec', onclick: () => openRefine(s, r) }, '✎ 和 AI 改一改'),
           saveBtn)));
     });
 
@@ -793,22 +834,112 @@
       box.appendChild(h('div', null, '⏰ ' + [nf.when, nf.action].filter(Boolean).join(' · ')));
     }
     box.appendChild(h('div', { class: 'wp-foot' },
+      h('button', { class: 'sec', onclick: () => openRefine({ reply: '', reply_zh: '', scene: '自定义' }, r) }, '✎ 让 AI 写一条'),
       h('button', { class: 'sec', onclick: saveMyLastMessage }, '☆ 收藏我发的最后一条'),
       h('button', { class: 'sec', onclick: () => analyzeCurrent(true) }, '重新分析')));
     if (at) box.appendChild(h('div', { class: 'wp-muted', style: 'margin-top:6px' }, '分析时间：' + new Date(at).toLocaleString()));
     return box;
   }
 
+  /* ---------- 和 AI 多轮修改话术 ---------- */
+  function openRefine(sug, result) {
+    panelView = 'refine';
+    const chatName = getChatName();
+    const conv = readConversation(40);
+    const lang = (result && result.language) || '客户使用的语言';
+    const system = baseContext() + '\n\n' + [
+      '【本次任务：和销售一起修改一条准备发给客户的 WhatsApp 回复】',
+      '- 销售会给出当前草稿（可能为空）和中文修改要求，你按要求改写。草稿里销售手动改过的内容要保留，除非要求里说要改。',
+      '- 回复语言：' + lang + '。简短自然，像真人聊天。',
+      '- 只输出 JSON：{"reply":"客户语言的回复","reply_zh":"中文意思","note":"这次改了什么，一句中文"}',
+      '',
+      convText(conv, chatName),
+    ].join('\n');
+    const history = [{ role: 'system', content: system }];
+    let draftZh = sug.reply_zh || '';
+
+    const draft = h('textarea', { class: 'wr-draft', rows: '5', placeholder: '还没有草稿。在下面告诉 AI 想写什么，比如：告诉客户下周有船，问他要不要先付定金锁车' });
+    draft.value = sug.reply || '';
+    const zhLine = h('div', { class: 'wp-zh' }, draftZh ? '中文：' + draftZh : '');
+    const thread = h('div', { class: 'wr-thread' });
+    const ask = h('textarea', { class: 'wr-ask', rows: '2', placeholder: '告诉 AI 怎么改，比如：语气热情一点 / 改短一点 / 加上可以视频看车（Enter 发送，Shift+Enter 换行）' });
+    const sendBtn = h('button', null, '发送');
+    const quick = ['更热情一点', '更简短', '更专业正式', '加一个问题推进成交', '换个说法'];
+
+    async function send(textOverride) {
+      const req = (textOverride || ask.value).trim();
+      if (!req) { ask.focus(); return; }
+      if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
+      ask.value = '';
+      thread.appendChild(h('div', { class: 'wr-me' }, req));
+      const wait = h('div', { class: 'wr-ai wp-muted' }, 'AI 正在修改…');
+      thread.appendChild(wait);
+      thread.scrollTop = thread.scrollHeight;
+      sendBtn.disabled = true;
+      history.push({ role: 'user', content: '当前草稿：\n' + (draft.value.trim() || '（空）') + '\n\n修改要求：' + req });
+      try {
+        const { json, raw } = await callDeepSeek(history, 800);
+        if (!json.reply) throw new Error('AI 没有给出新草稿，请换个说法再试');
+        history.push({ role: 'assistant', content: raw });
+        draft.value = String(json.reply);
+        draftZh = String(json.reply_zh || '');
+        zhLine.textContent = draftZh ? '中文：' + draftZh : '';
+        wait.className = 'wr-ai';
+        wait.textContent = '✓ ' + (json.note || '已修改') ;
+      } catch (e) {
+        if (history[history.length - 1].role === 'user') history.pop();
+        wait.className = 'wr-ai wr-err';
+        wait.textContent = '失败：' + e.message;
+      } finally {
+        sendBtn.disabled = false;
+        thread.scrollTop = thread.scrollHeight;
+      }
+    }
+    sendBtn.addEventListener('click', () => send());
+    ask.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
+    });
+
+    const saveBtn = h('button', { class: 'sec', onclick: () => {
+      if (!draft.value.trim()) { toast('草稿是空的', true); return; }
+      savePb(draft.value.trim(), draftZh, sug.scene || '自定义', result && result.level, saveBtn);
+    } }, '☆ 收藏');
+
+    const box = h('div', { class: 'wr' },
+      h('div', { class: 'wp-sec', style: 'margin-top:0' }, '草稿（可以直接手改）'),
+      draft, zhLine,
+      h('div', { class: 'wp-btns' },
+        h('button', { onclick: () => { if (draft.value.trim()) fillInput(draft.value.trim()); else toast('草稿是空的', true); } }, '填入聊天'),
+        saveBtn,
+        h('button', { class: 'sec', onclick: backToResult }, '← 返回分析')),
+      h('div', { class: 'wp-sec' }, '和 AI 对话修改'),
+      thread,
+      h('div', { class: 'wr-quick' }, quick.map((q) => h('button', { class: 'chip', onclick: () => send(q) }, q))),
+      h('div', { class: 'wr-input' }, ask, sendBtn));
+    showPanel(box, '修改话术');
+    (draft.value ? ask : ask).focus();
+  }
+
+  function backToResult() {
+    panelView = 'result';
+    const saved = ai.analyses()[getChatName()];
+    if (saved) showPanel(renderResult(normalizeResult(saved.result), saved.at));
+    else showNotAnalyzed();
+  }
+
+  function showNotAnalyzed() {
+    panelView = 'result';
+    showPanel(h('div', { style: 'padding:24px 0;text-align:center' },
+      h('div', { class: 'wp-muted', style: 'margin-bottom:10px' }, '这个客户还没有分析'),
+      h('button', { onclick: () => analyzeCurrent(true) }, '分析客户')));
+  }
+
   function saveMyLastMessage() {
     const mine = readConversation(80).filter((m) => m.from === '我方' && !/^\[(图片|语音|视频|文件)\]$/.test(m.text));
     const last = mine[mine.length - 1];
     if (!last) { toast('这个聊天里没有找到你发的文字消息', true); return; }
-    const pb = ai.playbook();
-    if (pb.some((p) => p.text === last.text)) { toast('话术库里已经有这条了'); return; }
     const rec = ai.analyses()[getChatName()];
-    pb.push({ id: 'u' + Date.now(), scene: '我的回复', text: last.text, level: rec ? rec.level : '', at: Date.now() });
-    ai.savePlaybook(pb);
-    toast('已收藏：' + last.text.slice(0, 40) + (last.text.length > 40 ? '…' : ''));
+    savePb(last.text, '', '我的回复', rec ? rec.level : '');
   }
 
   let analyzing = false;
@@ -816,6 +947,7 @@
     const name = getChatName();
     if (!document.querySelector('#main') || !name) { toast('请先打开一个聊天', true); return; }
     panelChat = name;
+    panelView = 'result';
     if (!ai.apiKey) {
       showPanel(h('div', null, h('p', null, '还没有填写 DeepSeek API Key。'), h('button', { onclick: openSettings }, '打开设置')));
       return;
@@ -829,53 +961,33 @@
     showPanel(h('div', { class: 'wp-muted', style: 'padding:20px 0;text-align:center' }, '正在分析 ' + conv.length + ' 条消息…'));
     try {
       const { system, user } = buildPrompt(conv, name);
-      const r = normalizeResult(await callDeepSeek(system, user));
+      const r = normalizeResult((await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: user }])).json);
       ai.saveAnalysis(name, r);
-      if (getChatName() === name) showPanel(renderResult(r, Date.now()));
-      markChatList();
+      if (getChatName() === name && panelView === 'result') showPanel(renderResult(r, Date.now()));
       if (ai.autoLabel && getChatName() === name) {
-        const res = await applyLevelList(r.level);
+        const res = await applyLevelList(r.level, name);
         toast(res.ok ? '已加入列表「' + r.level + ' ' + LEVEL_NAME[r.level] + '」' : res.msg, !res.ok);
       }
     } catch (e) {
-      showPanel(h('div', null, h('p', { style: 'color:#c62828' }, '分析失败：' + e.message), h('button', { onclick: () => analyzeCurrent(true) }, '重试')));
+      if (getChatName() === name) showPanel(h('div', null, h('p', { style: 'color:#c62828' }, '分析失败：' + e.message), h('button', { onclick: () => analyzeCurrent(true) }, '重试')));
+      else toast('分析失败：' + e.message, true);
     } finally {
       analyzing = false;
     }
   }
 
-  // 切换聊天时：有分析记录就自动显示，没有就收起面板
+  // 切换聊天时：第三栏跟着切换到该客户的分析结果
   setInterval(() => {
     const name = getChatName();
-    if (panel.style.display !== 'block' || !name || name === panelChat) return;
+    if (!document.documentElement.classList.contains('wat-docked')) return;
+    if (!name) { dock(false); return; }
+    if (name === panelChat) return;
     panelChat = name;
+    panelView = 'result';
     const saved = ai.analyses()[name];
     if (saved) showPanel(renderResult(normalizeResult(saved.result), saved.at));
-    else panel.style.display = 'none';
+    else showNotAnalyzed();
   }, 700);
-
-  /* ---------- 左侧聊天列表显示级别 ---------- */
-  function markChatList() {
-    const side = document.querySelector('#pane-side');
-    if (!side) return;
-    const all = ai.analyses();
-    side.querySelectorAll('[role="row"], [role="listitem"]').forEach((row) => {
-      const t = row.querySelector('[data-testid="cell-frame-title"] span[title], span[title]');
-      if (!t) return;
-      const rec = all[(t.getAttribute('title') || '').trim()];
-      let badge = row.querySelector('.wat-lv-badge');
-      if (!rec) { if (badge) badge.remove(); return; }
-      if (!badge) {
-        badge = document.createElement('span');
-        t.insertAdjacentElement('afterend', badge);
-      }
-      const cls = 'wat-lv wat-lv-badge wat-lv-' + rec.level;
-      if (badge.className !== cls) badge.className = cls;
-      if (badge.textContent !== rec.level) badge.textContent = rec.level;
-      badge.title = rec.level + ' ' + LEVEL_NAME[rec.level];
-    });
-  }
-  setInterval(markChatList, 1500);
 
   /* ---------- 设置面板 ---------- */
   const setDlg = h('div', { id: 'wat-settings' });
@@ -886,14 +998,13 @@
     const keyIn = h('input', { type: 'password', placeholder: 'sk-…', autocomplete: 'off' });
     keyIn.value = ai.apiKey;
     const bizIn = h('textarea', { rows: '4' }); bizIn.value = ai.biz;
-    const priceIn = h('textarea', { rows: '4', placeholder: '例：R8 标准版 FOB 上海 USD xxxx；运到伯利兹城落地价 USD xxxx（留空则 AI 不报任何数字）' }); priceIn.value = ai.prices;
+    const priceIn = h('textarea', { rows: '5', placeholder: '例：R8 标准版 FOB 上海 USD xxxx；运到伯利兹城落地价 USD xxxx；付款：T/T 30% 定金，70% 发货前付清；交期：付款后 xx 天（留空则 AI 不提任何价格和条件）' }); priceIn.value = ai.prices;
     const rulesIn = h('textarea', { rows: '5' }); rulesIn.value = ai.rules;
     const labelIn = h('input', { type: 'checkbox' }); labelIn.checked = ai.autoLabel;
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
       pbBox.innerHTML = '';
-      const pb = ai.playbook();
-      pb.slice().reverse().forEach((p) => {
+      ai.playbook().slice().reverse().forEach((p) => {
         pbBox.appendChild(h('div', { class: 'ws-pbi' },
           h('span', { class: 'wp-tag' }, p.scene + (p.level ? ' · ' + p.level : '')),
           h('span', { class: 'ws-pbt' }, p.text),
@@ -905,10 +1016,10 @@
       h('div', { class: 'wp-head' }, h('b', null, '翻译助手设置'), h('button', { class: 'wp-x', onclick: () => { setDlg.style.display = 'none'; } }, '×')),
       h('label', null, 'DeepSeek API Key（只保存在这台电脑的浏览器里）'), keyIn,
       h('label', null, '我方业务介绍'), bizIn,
-      h('label', null, '价格表（AI 只会引用这里的数字）'), priceIn,
+      h('label', null, '价格表与交易条款（价格、付款方式、交期等，AI 只会引用这里写的）'), priceIn,
       h('label', null, '客户分级标准'), rulesIn,
       h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表'),
-      h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面）'), pbBox,
+      h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox,
       h('div', { class: 'wp-btns', style: 'justify-content:flex-end;margin-top:10px' },
         h('button', { class: 'sec', onclick: () => {
           const data = JSON.stringify(ai.playbook(), null, 2);
