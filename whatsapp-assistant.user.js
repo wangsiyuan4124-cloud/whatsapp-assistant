@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.6.0
+// @version      1.7.0
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -487,6 +487,14 @@
   #wat-panel button.wp-tab{background:none;color:#667781;border-radius:0;padding:8px 14px;font-size:13px;border-bottom:2px solid transparent}
   #wat-panel button.wp-tab.on{color:#0f2a44;font-weight:600;border-bottom-color:#25d366}
   #wat-panel .wp-body.ask{display:flex;flex-direction:column;overflow:hidden;padding-bottom:10px}
+  .ask-top{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;flex:none}
+  .ask-title{font-weight:600;color:#3b4a54;margin:2px 0 4px;flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ask-attach{align-items:center;gap:6px;background:#e7f3ff;color:#0b4f7c;border-radius:8px;padding:4px 8px;margin-bottom:6px;font-size:12px;flex:none}
+  .ask-ctx{font-size:11px;color:#3b6b47;margin-bottom:3px}
+  .ask-hist{display:flex;align-items:center;gap:6px;border:1px solid #e9edef;border-radius:8px;padding:8px;margin-bottom:6px;cursor:pointer}
+  .ask-hist.on{border-color:#25d366;background:#f4fff6}
+  .ask-hist-main{flex:1;min-width:0}.ask-hist-t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #wat-panel .ask-hist button.ws-close{color:#8696a0;font-size:12px}
   .ask-thread{flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px 0 8px}
   .ask-me{align-self:flex-end;background:#d9fdd3;border-radius:10px;padding:6px 10px;max-width:88%;white-space:pre-wrap}
   .ask-ai{align-self:flex-start;background:#f0f2f5;border-radius:10px;padding:8px 10px;max-width:94%;white-space:pre-wrap}
@@ -854,7 +862,9 @@
 
   const panel = h('div', { id: 'wat-panel' });
   document.documentElement.appendChild(panel);
-  document.documentElement.style.setProperty('--wat-pw', PANEL_W + 'px');
+  const PANEL_W_WIDE = 650;
+  const applyPanelWidth = () => document.documentElement.style.setProperty('--wat-pw', (store.get('panelWide', false) ? PANEL_W_WIDE : PANEL_W) + 'px');
+  applyPanelWidth();
   let panelChat = '';
   let panelView = 'result'; // result | refine
 
@@ -873,14 +883,14 @@
     panel.appendChild(h('div', { class: 'wp-head' },
       sub ? h('button', { class: 'wp-back', title: '返回客户分析', onclick: backToResult }, '← 返回') : null,
       h('b', null, title || '客户分析'),
-      h('span', { class: 'wp-sub' }, panelChat),
+      h('span', { class: 'wp-sub' }, panelView === 'ask' ? '' : panelChat),
       h('button', { class: 'wp-x', title: '关闭整个右栏', onclick: () => dock(false) }, '×')));
     panel.appendChild(h('div', { class: 'wp-slot', id: 'wat-barslot' }));
-    if (!sub && panelChat) {
+    if (!sub) {
       lastTab = panelView === 'ask' ? 'ask' : 'result';
       panel.appendChild(h('div', { class: 'wp-tabs' },
         h('button', { class: 'wp-tab' + (lastTab === 'result' ? ' on' : ''), onclick: () => { if (panelView !== 'result') backToResult(); } }, '客户分析'),
-        h('button', { class: 'wp-tab' + (lastTab === 'ask' ? ' on' : ''), onclick: () => { if (panelView !== 'ask') openAsk(); } }, '问 AI')));
+        h('button', { class: 'wp-tab' + (lastTab === 'ask' ? ' on' : ''), onclick: () => { if (panelView !== 'ask') openAsk(); } }, 'AI 助手')));
     }
     panel.appendChild(statusEl);
     panel.appendChild(h('div', { class: 'wp-body' + (panelView === 'ask' ? ' ask' : '') }, content));
@@ -1076,6 +1086,9 @@
 
   function backToResult() {
     panelView = 'result';
+    lastTab = 'result';
+    if (!getChatName()) { panelChat = ''; setStatus(''); showPanel(h('div', { class: 'wp-muted', style: 'padding:24px 0;text-align:center' }, '打开一个客户聊天，这里会显示分析')); return; }
+    panelChat = getChatName();
     const saved = ai.analyses()[getChatName()];
     if (saved) {
       showPanel(renderResult(normalizeResult(saved.result), saved.at));
@@ -1189,85 +1202,114 @@
     } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = old; }
   }
 
-  /* ---------- 问 AI（右栏第二个标签页） ---------- */
-  const askStore = {
-    get(name) { return (store.get('askHistory', {})[name]) || []; },
-    set(name, list) { const all = store.get('askHistory', {}); all[name] = list.slice(-40); store.set('askHistory', all); },
+  /* ---------- AI 助手（独立对话，和客户无关；像豆包 / DeepSeek App） ---------- */
+  const chats = {
+    all() { return store.get('aiChats', []); },
+    save(list) { store.set('aiChats', list.slice(-50)); },
+    get(id) { return chats.all().find((c) => c.id === id); },
+    put(chat) { const l = chats.all().filter((c) => c.id !== chat.id); l.push(chat); chats.save(l); },
+    remove(id) { chats.save(chats.all().filter((c) => c.id !== id)); },
+    get currentId() { return store.get('aiCurrent', ''); },
+    set currentId(v) { store.set('aiCurrent', v); },
   };
-  function askSystem(chatName) {
-    const conv = readConversation(60);
-    const saved = ai.analyses()[chatName];
-    const r = saved && saved.result;
-    const summary = r ? ('级别 ' + r.level + ' ' + (LEVEL_NAME[r.level] || '') + '；' + (r.customer_type || '') + '；' + (r.reason || '') +
-      '；已知：' + Object.entries(r.known || {}).filter(([, v]) => v && !/^未知|unknown$/i.test(String(v))).map(([k, v]) => k + '=' + v).join('，') +
-      '；还缺：' + (r.missing || []).join('、')) : '（还没有分析）';
-    return baseContext() + '\n\n' + [
-      '【本次任务：做销售的参谋】你正在帮这位销售处理当前这个 WhatsApp 客户，回答他的问题，帮助他做决定。',
-      '- 用中文回答，先给结论再给理由，简洁实用，可以分点。不要使用 Markdown 标题和加粗符号。',
-      '- 问题和当前客户有关时，结合下面的聊天记录和分析来回答；和客户无关的一般问题就直接回答。',
-      '- 关税、法规、海运时效等外部信息只能给一般性参考，并提醒以官方或货代的确认为准。',
-      '- 如果回答里包含建议发给客户的一段话，把它放在 reply 字段（用客户的语言），reply_zh 放中文意思；没有就留空。',
-      '- 只输出 JSON：{"answer":"中文回答","reply":"","reply_zh":""}',
-      '',
-      '【当前客户分析】' + summary,
-      convText(conv, chatName),
+  let askMode = 'chat'; // chat | history
+  function assistantSystem() {
+    const prices = ai.prices.trim();
+    return [
+      '你是一个全能的 AI 助手，像豆包、DeepSeek 一样可以回答各种问题。用户是一位中国汽车出口经销商，熟悉他的业务有助于你回答：',
+      '【他的业务】' + ai.biz,
+      '【他的价格表与交易条款】' + (prices || '（未填写）'),
+      '【回答要求】',
+      '- 默认用中文回答，用户用别的语言提问就用那种语言回答。先给结论再展开，清楚实用。不要使用 Markdown 的 # 标题和 ** 加粗。',
+      '- 关税、法规、汇率、海运时效等外部信息只能给一般性参考，提醒以官方或货代确认为准；不知道就直说，不要编。',
+      '- 用户引用了某个客户的 WhatsApp 聊天时，结合那段聊天回答；涉及价格、付款、交期等具体条件，只用上面价格表里有的，没有的不要编数字。',
+      '- 如果回答里有建议直接发给客户的一段话，放进 reply 字段（用客户的语言），reply_zh 放中文意思；没有就留空字符串。',
+      '- 只输出 JSON：{"answer":"回答正文","reply":"","reply_zh":""}',
     ].join('\n');
   }
+
   function openAsk() {
-    const chatName = getChatName();
-    if (!chatName) { toast('请先打开客户聊天', true); return; }
-    panelChat = chatName;
+    panelChat = getChatName() || '';
     panelView = 'ask';
     lastTab = 'ask';
+    setStatus('');
+    if (askMode === 'history') return showPanel(renderHistory(), 'AI 助手');
+    let chat = chats.get(chats.currentId);
     const thread = h('div', { class: 'ask-thread' });
-    const input = h('textarea', { rows: '2', placeholder: '问点什么，比如：这个客户值得报低价吗？（Enter 发送，Shift+Enter 换行）' });
+    const input = h('textarea', { rows: '2', placeholder: '问点什么…（Enter 发送，Shift+Enter 换行）' });
     const sendBtn = h('button', null, '发送');
+    let attach = null; // { name, conv }
+    const attachChip = h('div', { class: 'ask-attach', style: 'display:none' });
+    const renderAttach = () => {
+      attachChip.innerHTML = '';
+      if (!attach) { attachChip.style.display = 'none'; return; }
+      attachChip.style.display = 'flex';
+      attachChip.appendChild(h('span', null, '📎 将引用「' + attach.name + '」的聊天（' + attach.count + ' 条消息）'));
+      attachChip.appendChild(h('button', { class: 'ws-close', title: '取消引用', onclick: () => { attach = null; renderAttach(); } }, '×'));
+    };
+    const quoteBtn = h('button', { class: 'sec', title: '把当前打开的客户聊天一起发给 AI（只附在下一条提问里）' }, '📎 引用当前客户聊天');
+    quoteBtn.onclick = () => {
+      const name = getChatName();
+      if (!name) { toast('请先在左边打开一个客户聊天', true); return; }
+      const conv = readConversation(60);
+      if (!conv.length) { toast('这个聊天里没有可引用的文字消息', true); return; }
+      attach = { name, count: conv.length, text: convText(conv, name) };
+      renderAttach();
+      input.focus();
+    };
+
     const addBubble = (m) => {
-      if (m.role === 'user') { thread.appendChild(h('div', { class: 'ask-me' }, m.content)); return; }
-      const b = h('div', { class: 'ask-ai' + (m.err ? ' wr-err' : '') }, String(m.answer || m.content || '').replace(/\*\*/g, ''));
+      if (m.role === 'user') {
+        thread.appendChild(h('div', { class: 'ask-me' }, m.ctxName ? h('div', { class: 'ask-ctx' }, '📎 引用了「' + m.ctxName + '」的聊天') : null, m.content));
+        return;
+      }
+      const b = h('div', { class: 'ask-ai' }, String(m.answer || '').replace(/\*\*/g, ''));
       if (m.reply) {
         const saveBtn = h('button', { class: 'sec' }, '☆ 收藏');
-        saveBtn.onclick = () => savePb(m.reply, m.reply_zh, '问 AI', '', saveBtn);
+        saveBtn.onclick = () => savePb(m.reply, m.reply_zh, 'AI 助手', '', saveBtn);
         b.appendChild(h('div', { class: 'ask-reply' },
-          h('div', { class: 'wp-goal' }, '建议发给客户：'),
+          h('div', { class: 'wp-goal' }, '可以发给客户：'),
           h('div', { class: 'wp-reply' }, m.reply),
           m.reply_zh ? h('div', { class: 'wp-zh' }, '中文：' + m.reply_zh) : null,
-          h('div', { class: 'wp-btns' }, h('button', { onclick: () => fillInput(m.reply) }, '填入'), saveBtn)));
+          h('div', { class: 'wp-btns' }, h('button', { onclick: () => fillInput(m.reply) }, '填入聊天'), saveBtn)));
       }
       thread.appendChild(b);
     };
-    const history = askStore.get(chatName);
-    if (!history.length) thread.appendChild(h('div', { class: 'wp-muted', style: 'text-align:center;padding:16px 0' },
-      'AI 已经看过这位客户的聊天记录和分析，也知道你的业务和价格条款。有什么需要拿主意的，直接问。'));
-    history.forEach(addBubble);
+    if (!chat || !chat.msgs.length) {
+      thread.appendChild(h('div', { class: 'wp-muted', style: 'text-align:center;padding:24px 0' },
+        '这是独立的 AI 助手，和客户聊天无关，切换客户也不会影响这里。需要它参考某个客户时，点下面的「📎 引用当前客户聊天」。'));
+    } else chat.msgs.forEach(addBubble);
 
     async function send() {
       const q = input.value.trim();
       if (!q) { input.focus(); return; }
       if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
-      if (getChatName() !== chatName) { toast('聊天已切换，请重新提问', true); return; }
       input.value = '';
-      const hist = askStore.get(chatName);
+      if (!chat) { chat = { id: 'c' + Date.now(), title: q.slice(0, 24), at: Date.now(), msgs: [] }; chats.currentId = chat.id; }
       const userMsg = { role: 'user', content: q, at: Date.now() };
-      hist.push(userMsg); askStore.set(chatName, hist);
+      if (attach) { userMsg.ctxName = attach.name; userMsg.ctx = attach.text; attach = null; renderAttach(); }
+      chat.msgs.push(userMsg); chat.at = Date.now(); chats.put(chat);
       if (thread.firstChild && thread.firstChild.classList.contains('wp-muted')) thread.innerHTML = '';
       addBubble(userMsg);
       const wait = h('div', { class: 'ask-ai wp-muted' }, 'AI 正在思考…');
       thread.appendChild(wait); thread.scrollTop = thread.scrollHeight;
       sendBtn.disabled = true;
+      const chatId = chat.id;
       try {
-        const msgs = [{ role: 'system', content: askSystem(chatName) }];
-        hist.slice(-20).forEach((m) => msgs.push(m.role === 'user'
-          ? { role: 'user', content: m.content }
+        const msgs = [{ role: 'system', content: assistantSystem() }];
+        chat.msgs.slice(-24).forEach((m) => msgs.push(m.role === 'user'
+          ? { role: 'user', content: (m.ctx ? '【我引用的客户聊天】\n' + m.ctx + '\n\n【我的问题】\n' : '') + m.content }
           : { role: 'assistant', content: JSON.stringify({ answer: m.answer || '', reply: m.reply || '', reply_zh: m.reply_zh || '' }) }));
-        const { json } = await callDeepSeek(msgs, 1200);
+        const { json } = await callDeepSeek(msgs, 2000);
         const ans = { role: 'assistant', answer: String((json && json.answer) || '（AI 没有给出回答）'), reply: (json && json.reply) || '', reply_zh: (json && json.reply_zh) || '', at: Date.now() };
-        const h2 = askStore.get(chatName); h2.push(ans); askStore.set(chatName, h2);
+        const c2 = chats.get(chatId) || chat;
+        c2.msgs.push(ans); c2.at = Date.now(); chats.put(c2); chat = c2;
         wait.remove();
-        if (getChatName() === chatName && panelView === 'ask') addBubble(ans);
+        if (panelView === 'ask' && chats.currentId === chatId) addBubble(ans);
       } catch (e) {
-        wait.className = 'ask-ai wr-err'; wait.textContent = '失败：' + e.message;
-        const h2 = askStore.get(chatName); if (h2.length && h2[h2.length - 1] === userMsg || (h2.length && h2[h2.length - 1].role === 'user')) { h2.pop(); askStore.set(chatName, h2); }
+        wait.className = 'ask-ai wr-err'; wait.textContent = '失败：' + e.message + '（问题已保留，可以再发一次）';
+        const c2 = chats.get(chatId);
+        if (c2 && c2.msgs.length && c2.msgs[c2.msgs.length - 1].role === 'user') { const last = c2.msgs.pop(); chats.put(c2); chat = c2; input.value = last.content; }
       } finally {
         sendBtn.disabled = false;
         thread.scrollTop = thread.scrollHeight;
@@ -1277,15 +1319,42 @@
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
     });
-    const clearBtn = h('button', { class: 'sec', title: '清空和 AI 的这段对话' }, '清空');
-    clearBtn.onclick = () => { if (confirmInline(null, '将清空这位客户的问 AI 记录')) { askStore.set(chatName, []); openAsk(); } };
+
+    const wide = store.get('panelWide', false);
+    const top = h('div', { class: 'ask-top' },
+      h('button', { onclick: () => { chats.currentId = ''; openAsk(); } }, '＋ 新对话'),
+      h('button', { class: 'sec', onclick: () => { askMode = 'history'; openAsk(); } }, '🕘 历史对话（' + chats.all().length + '）'),
+      h('button', { class: 'sec', title: '把右栏加宽或恢复', onclick: () => { store.set('panelWide', !wide); applyPanelWidth(); window.dispatchEvent(new Event('resize')); openAsk(); } }, wide ? '⇔ 恢复宽度' : '⇔ 加宽'));
     const box = h('div', { style: 'display:flex;flex-direction:column;height:100%;min-height:0' },
+      top,
+      chat && chat.msgs.length ? h('div', { class: 'ask-title' }, chat.title) : null,
       thread,
-      h('div', { class: 'ask-input' }, input, h('div', { style: 'display:flex;flex-direction:column;gap:4px' }, sendBtn, clearBtn)));
-    setStatus('');
-    showPanel(box, '客户分析');
+      attachChip,
+      h('div', { class: 'ask-input' }, input, sendBtn),
+      h('div', { style: 'margin-top:6px' }, quoteBtn));
+    showPanel(box, 'AI 助手');
     thread.scrollTop = thread.scrollHeight;
     input.focus();
+  }
+
+  function renderHistory() {
+    const list = chats.all().slice().sort((a, b) => b.at - a.at);
+    const box = h('div', { style: 'height:100%;overflow:auto' },
+      h('div', { class: 'ask-top' },
+        h('button', { class: 'sec', onclick: () => { askMode = 'chat'; openAsk(); } }, '← 返回当前对话'),
+        h('button', { onclick: () => { chats.currentId = ''; askMode = 'chat'; openAsk(); } }, '＋ 新对话')));
+    if (!list.length) box.appendChild(h('div', { class: 'wp-muted', style: 'padding:20px 0;text-align:center' }, '还没有历史对话'));
+    list.forEach((c) => {
+      box.appendChild(h('div', { class: 'ask-hist' + (c.id === chats.currentId ? ' on' : '') },
+        h('div', { class: 'ask-hist-main', onclick: () => { chats.currentId = c.id; askMode = 'chat'; openAsk(); } },
+          h('div', { class: 'ask-hist-t' }, c.title || '（无标题）'),
+          h('div', { class: 'wp-muted' }, fmtTime(c.at) + ' · ' + c.msgs.filter((m) => m.role === 'user').length + ' 个问题')),
+        h('button', { class: 'ws-close', title: '删除这段对话（再点一次确认）', onclick: (e) => {
+          e.stopPropagation();
+          if (confirmInline(null, '将删除「' + (c.title || '').slice(0, 12) + '」')) { chats.remove(c.id); if (chats.currentId === c.id) chats.currentId = ''; openAsk(); }
+        } }, '删除')));
+    });
+    return box;
   }
 
   // 分析结果是否过期：只提示，不自动分析（由你点「分析客户」更新）
@@ -1321,6 +1390,11 @@
   function syncPanel() {
     const name = getChatName();
     if (!document.documentElement.classList.contains('wat-docked')) return;
+    if (lastTab === 'ask' && panelView === 'ask') {
+      // AI 助手和客户无关：切换客户不刷新，只更新标题里的客户名
+      if (name !== panelChat) panelChat = name || '';
+      return;
+    }
     if (!name) {
       // 没打开聊天（或页面正在重新排版）时不收起第三栏，只显示提示
       if (panelChat !== '' || !panel.firstChild) {
@@ -1332,7 +1406,6 @@
     if (name === panelChat) return;
     panelChat = name;
     notice = null;
-    if (lastTab === 'ask') { setStatus(''); openAsk(); return; }
     panelView = 'result';
     const saved = ai.analyses()[name];
     if (saved) {
