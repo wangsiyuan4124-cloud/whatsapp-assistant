@@ -1,0 +1,24 @@
+const {chromium}=require('playwright');const fs=require('fs');
+const code=fs.readFileSync((process.env.SCRIPT||require('path').join(__dirname,'..','whatsapp-assistant.user.js')),'utf8');
+(async()=>{const b=await chromium.launch();const p=await b.newPage({viewport:{width:1400,height:900}});p.on('pageerror',e=>console.log('PAGEERR',e.message));
+await p.goto('file://'+__dirname+'/page5.html');
+await p.addScriptTag({path:'node_modules/html2canvas/dist/html2canvas.min.js'});
+await p.addScriptTag({path:'node_modules/jspdf/dist/jspdf.umd.min.js'});
+await p.addScriptTag({content:code});
+await p.evaluate(()=>GM_setValue('dsKey','sk-test'));await p.waitForTimeout(600);
+await p.click('#wat-analyze');await p.waitForTimeout(2500);
+await p.click('#wat-panel button:has-text("生成 PI")');await p.waitForTimeout(800);
+console.log('warn:',await p.evaluate(()=>document.querySelector('.pi-warn')?.innerText));
+await p.click('.pi-warn button');await p.waitForTimeout(300);
+console.log('settings tab on:',await p.evaluate(()=>document.querySelector('.ws-tab.on').textContent),'pi visible:',await p.evaluate(()=>getComputedStyle(document.querySelector('.ws-pi')).display),'basic hidden:',await p.evaluate(()=>{const k=document.querySelector('#wat-settings input[type=password]');return k.offsetParent===null;}));
+// fill bank & upload seal via file input
+const inputs=await p.$$('.ws-pi input[type=text]');
+const setByLabel=async(lbl,v)=>p.evaluate(([lbl,v])=>{const d=[...document.querySelectorAll('.ws-pi > div')].find(x=>x.querySelector('label')&&x.querySelector('label').textContent===lbl);const i=d.querySelector('input,textarea');i.value=v;},[lbl,v]);
+await setByLabel('开户银行','TEST BANK');await setByLabel('SWIFT','TESTHKHH');await setByLabel('银行账号','000-000');await setByLabel('电话','+86 1');
+const fileInputs=await p.$$('.ws-pi input[type=file]');
+await fileInputs[1].setInputFiles(require('path').join(__dirname,'fixtures','seal-dummy.png'));await fileInputs[0].setInputFiles(require('path').join(__dirname,'fixtures','seal-dummy.png'));await p.waitForTimeout(300);
+await p.click('#wat-settings button:has-text("保存")');await p.waitForTimeout(1000);
+console.log('saved seal:',await p.evaluate(()=>(GM_getValue('piSeller').seal||'').slice(0,22)),'warn now:',await p.evaluate(()=>document.querySelector('.pi-warn')?.innerText||'none'));
+await p.click('#wat-panel button:has-text("生成并放进聊天")');await p.waitForTimeout(6000);
+console.log('pasted files:',await p.evaluate(()=>(window.__pastedAll||[]).map(f=>f.name+' '+f.type+' '+f.size)),'toast:',await p.evaluate(()=>document.getElementById('wat-toast').textContent));
+await b.close();})();

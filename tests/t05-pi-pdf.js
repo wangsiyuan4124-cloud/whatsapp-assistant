@@ -1,0 +1,30 @@
+const {chromium}=require('playwright');const fs=require('fs');
+const code=fs.readFileSync((process.env.SCRIPT||require('path').join(__dirname,'..','whatsapp-assistant.user.js')),'utf8');
+const seal='data:image/png;base64,'+fs.readFileSync(process.argv[2]||require('path').join(__dirname,'fixtures','seal-dummy.png')).toString('base64');
+(async()=>{const b=await chromium.launch();const p=await b.newPage({viewport:{width:1400,height:900}});p.on('pageerror',e=>console.log('PAGEERR',e.message));
+await p.goto('file://'+__dirname+'/page5.html');
+await p.addScriptTag({path:'node_modules/html2canvas/dist/html2canvas.min.js'});
+await p.addScriptTag({path:'node_modules/jspdf/dist/jspdf.umd.min.js'});
+await p.addScriptTag({content:code});
+await p.evaluate((seal)=>{GM_setValue('dsKey','sk-test');GM_setValue('piSeller',{phone:'+86 138 0000 0000',email:'sales@cheryamc.com',contact:'Kevin Wang',bankName:'TEST BANK (HONG KONG) LIMITED',bankSwift:'TESTHKHH',bankAccount:'000-000000-000',bankAddress:'Test Road, Hong Kong',payment:'30% T/T 定金，70% 发货前付清',delivery:'收到定金后 30 天内发货',seal});},seal);
+await p.waitForTimeout(600);
+await p.click('#wat-analyze');await p.waitForTimeout(2500);
+await p.click('#wat-panel button:has-text("生成 PI")');await p.waitForTimeout(800);
+console.log('editor:',await p.evaluate(()=>document.querySelector('#wat-panel .wp-head b').textContent),'missing:',await p.evaluate(()=>document.querySelectorAll('.pi-miss').length),'total:',await p.evaluate(()=>document.querySelector('.pi-total').textContent));
+// fill buyer name & address & color
+const fillLabel=async(lbl,val)=>{await p.evaluate(([lbl,val])=>{const l=[...document.querySelectorAll('.pi-f')].find(x=>x.querySelector('span').textContent===lbl);const i=l.querySelector('.pi-in');i.value=val;i.dispatchEvent(new Event('input'));},[lbl,val]);};
+await fillLabel('姓名','John Smith');await fillLabel('地址','12 Albert Street');await fillLabel('颜色','白色');await fillLabel('电话/WhatsApp','+501 625-3871');
+console.log('missing after:',await p.evaluate(()=>[...document.querySelectorAll('.pi-miss')].map(i=>i.closest('.pi-f').querySelector('span').textContent)));
+await p.click('#wat-panel button:has-text("预览")');await p.waitForTimeout(1500);
+await p.screenshot({path:'pi_preview.png'});
+await p.click('#wat-pi-modal button:has-text("关闭")');
+await p.click('#wat-panel button:has-text("生成并放进聊天")');await p.waitForTimeout(6000);
+const info=await p.evaluate(async()=>{const f=window.__pasted; if(!f) return null; const buf=new Uint8Array(await f.arrayBuffer()); let s=''; for(let i=0;i<buf.length;i+=0x8000) s+=String.fromCharCode.apply(null,buf.subarray(i,i+0x8000)); return {name:f.name,size:f.size,type:f.type,b64:btoa(s)};});
+console.log('pasted:',info&&info.name,info&&info.size,info&&info.type,'toast:',await p.evaluate(()=>document.getElementById('wat-toast').textContent));
+if(info) fs.writeFileSync(require('path').join(__dirname,'out.pdf'),Buffer.from(info.b64,'base64'));
+console.log('records:',await p.evaluate(()=>JSON.stringify(GM_getValue('piRecords'))),'seq',await p.evaluate(()=>JSON.stringify(GM_getValue('piSeq'))));
+// spanish
+await p.selectOption('.pi-ed select','es');
+await p.click('#wat-panel button:has-text("预览")');await p.waitForTimeout(1500);
+await p.screenshot({path:'pi_preview_es.png'});
+await b.close();})();

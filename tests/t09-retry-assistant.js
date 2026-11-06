@@ -1,0 +1,17 @@
+const {chromium}=require('playwright');const fs=require('fs');
+const raw=fs.readFileSync((process.env.SCRIPT||require('path').join(__dirname,'..','whatsapp-assistant.user.js')),'utf8');
+const code='(function(window){\n'+raw+'\n})(new Proxy(window,{get(t,k){const v=t[k];return (typeof v==="function"&&!/^[A-Z]/.test(String(k)))?v.bind(t):v;},set(t,k,v){t[k]=v;return true;}}));';
+(async()=>{const b=await chromium.launch();const p=await b.newPage({viewport:{width:1400,height:900}});p.on('pageerror',e=>console.log('PAGEERR',e.message));
+await p.goto('file://'+__dirname+'/page9.html');
+await p.addScriptTag({content:code});
+await p.evaluate(()=>{GM_setValue('dsKey','sk-test');window.badOnce=1;});await p.waitForTimeout(600);
+await p.click('#wat-analyze');await p.waitForTimeout(3000);
+console.log('1 analysis after empty-once retry:',await p.evaluate(()=>document.querySelector('#wat-panel .wp-reply')?.textContent),'calls',await p.evaluate(()=>dsCalls));
+await p.evaluate(()=>{window.wrapJson=1;});await p.click('#wat-panel button:has-text("重新分析")');await p.waitForTimeout(2500);
+console.log('2 wrapped json parsed:',await p.evaluate(()=>document.querySelector('#wat-panel .wp-reply')?.textContent),await p.evaluate(()=>document.querySelector('#wat-panel .wp-reason')?.textContent));
+await p.click('.wp-tab:has-text("AI 助手")');await p.waitForTimeout(300);
+await p.fill('.ask-input textarea','Perfect, 1 unit gasoline 4WD.');await p.keyboard.press('Enter');await p.waitForTimeout(600);
+await p.fill('.ask-input textarea','帮我回复他车是白色的');await p.keyboard.press('Enter');await p.waitForTimeout(600);
+console.log('3 thread:',await p.evaluate(()=>document.querySelector('.ask-thread').innerText.replace(/\n+/g,' / ')));
+console.log('3 sys rule:',await p.evaluate(()=>lastDS.messages[0].content.includes('只做他让你做的事')),'json mode off:',await p.evaluate(()=>!lastDS.response_format),'history roles:',await p.evaluate(()=>lastDS.messages.map(m=>m.role).join(',')),'assistant raw kept:',await p.evaluate(()=>lastDS.messages[2].content.slice(0,10)));
+await b.close();})();
