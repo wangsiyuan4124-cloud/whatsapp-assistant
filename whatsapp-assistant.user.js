@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.5.0
+// @version      1.5.1
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -482,6 +482,7 @@
   .ws-tabs{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #e9edef;padding-bottom:8px;margin-bottom:4px}
   #wat-settings button.ws-tab{background:#f0f2f5;color:#3b4a54}#wat-settings button.ws-tab.on{background:#0f2a44;color:#fff}
   .ws-save{position:sticky;bottom:-16px;background:#fff;padding:8px 0}
+  #wat-panel button.wp-back{background:#f0f2f5;color:#3b4a54;padding:3px 10px}
   .wp-status{padding:6px 14px;border-bottom:1px solid #e9edef;font-size:12px;flex:none}
   .wp-status .ws-line{display:flex;align-items:center;gap:6px;color:#54656f}
   .wp-status .ws-line.ok{color:#0b6b3a}.wp-status .ws-line.busy{color:#027eb5}.wp-status .ws-line.warn{color:#9a6700}
@@ -835,10 +836,12 @@
 
   function showPanel(content, title) {
     panel.innerHTML = '';
+    const sub = panelView === 'refine' || panelView === 'pi';
     panel.appendChild(h('div', { class: 'wp-head' },
+      sub ? h('button', { class: 'wp-back', title: '返回客户分析', onclick: backToResult }, '← 返回') : null,
       h('b', null, title || '客户分析'),
       h('span', { class: 'wp-sub' }, panelChat),
-      h('button', { class: 'wp-x', title: '关闭第三栏', onclick: () => dock(false) }, '×')));
+      h('button', { class: 'wp-x', title: '关闭整个右栏', onclick: () => dock(false) }, '×')));
     panel.appendChild(h('div', { class: 'wp-slot', id: 'wat-barslot' }));
     panel.appendChild(statusEl);
     panel.appendChild(h('div', { class: 'wp-body' }, content));
@@ -1036,8 +1039,7 @@
     const saved = ai.analyses()[getChatName()];
     if (saved) {
       showPanel(renderResult(normalizeResult(saved.result), saved.at));
-      if (ai.apiKey && saved.fp !== convFingerprint() && atBottom()) analyzeCurrent(true, true);
-      else setStatus('已是最新分析（' + fmtTime(saved.at) + '）', 'ok');
+      staleStatus(saved);
     } else { setStatus(''); showNotAnalyzed(); }
   }
 
@@ -1120,14 +1122,18 @@
     }
   }
 
-  // 自动更新：当前聊天有新消息（客户或我方），内容稳定 4 秒后重新分析
-  let watchFp = '', watchSince = 0;
+  // 分析结果是否过期：只提示，不自动分析（由你点「分析客户」更新）
+  function staleStatus(saved) {
+    if (!saved) { setStatus(''); return; }
+    if (saved.fp === convFingerprint()) setStatus('已是最新分析（' + fmtTime(saved.at) + '）', 'ok');
+    else setStatus('对话有新消息，这是 ' + fmtTime(saved.at) + ' 的分析。点「分析客户」更新', 'warn');
+  }
   setInterval(async () => {
-    if (!document.documentElement.classList.contains('wat-docked') || !ai.apiKey) return;
+    if (!document.documentElement.classList.contains('wat-docked')) return;
     const name = getChatName();
-    if (!name || name !== panelChat) return;
+    if (!name || name !== panelChat || analyzing) return;
     // 延后的列表标签：输入框清空后再更新
-    if (pendingLabel && pendingLabel.name === name && !analyzing) {
+    if (pendingLabel && pendingLabel.name === name) {
       const el = getInput();
       if (el && !getInputText(el)) {
         const pl = pendingLabel; pendingLabel = null;
@@ -1135,16 +1141,15 @@
         if (res.ok) toast('已加入列表「' + pl.level + ' ' + LEVEL_NAME[pl.level] + '」'); else toast(res.msg, true);
       }
     }
-    const saved = ai.analyses()[name];
-    if (!saved || analyzing || !atBottom()) return; // 没分析过的客户不自动分析，省费用
-    const fp = convFingerprint();
-    if (!fp || fp === saved.fp) { watchFp = ''; return; }
-    if (fp !== watchFp) { watchFp = fp; watchSince = Date.now(); return; }
-    if (Date.now() - watchSince < 4000) return; // 等对方连发结束
-    watchFp = '';
-    if (panelView === 'result') analyzeCurrent(true, true);
-    else setStatus('客户有新消息，返回分析页时会自动更新', 'warn');
-  }, 1500);
+    // 只更新顶部状态提示（不调用 AI）
+    if (panelView === 'result' && atBottom() && !notice) {
+      const saved = ai.analyses()[name];
+      if (saved) {
+        const stale = saved.fp !== convFingerprint();
+        if (stale !== (statusKind === 'warn')) staleStatus(saved);
+      }
+    }
+  }, 2000);
 
   function syncPanel() {
     const name = getChatName();
@@ -1164,7 +1169,7 @@
     const saved = ai.analyses()[name];
     if (saved) {
       showPanel(renderResult(normalizeResult(saved.result), saved.at));
-      setStatus(saved.fp === convFingerprint() ? '已是最新分析（' + fmtTime(saved.at) + '）' : '上次分析：' + fmtTime(saved.at) + '，对话有更新，稍后自动重新分析', saved.fp === convFingerprint() ? 'ok' : 'warn');
+      staleStatus(saved);
     } else { setStatus(''); showNotAnalyzed(); }
   }
   setInterval(syncPanel, 700);
