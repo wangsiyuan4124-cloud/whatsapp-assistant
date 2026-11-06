@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.5.2
+// @version      1.5.3
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -783,8 +783,9 @@
     for (let i = 0; i < 2 && menuEl(); i++) {
       if (i === 0) {
         const t = panel && panel.isConnected ? panel : document.documentElement;
-        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) =>
-          t.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window })));
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) => {
+          try { t.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true })); } catch (e) { /* ignore */ }
+        });
       } else {
         const btn = findListButton();
         if (btn) btn.click();
@@ -1130,7 +1131,8 @@
         const el = getInput();
         if (el && getInputText(el)) pendingLabel = { name, level: r.level };
         else {
-          const res = await applyLevelList(r.level, name);
+          let res;
+          try { res = await applyLevelList(r.level, name); } catch (e) { res = { ok: false, msg: '加入列表出错：' + e.message + '，请手动加入' }; }
           if (!res.ok) toast(res.msg, true);
           else if (prevLevel !== r.level) toast('已加入列表「' + r.level + ' ' + LEVEL_NAME[r.level] + '」');
         }
@@ -1159,7 +1161,8 @@
       const el = getInput();
       if (el && !getInputText(el)) {
         const pl = pendingLabel; pendingLabel = null;
-        const res = await applyLevelList(pl.level, name);
+        let res;
+        try { res = await applyLevelList(pl.level, name); } catch (e) { res = { ok: false, msg: '加入列表出错：' + e.message }; }
         if (res.ok) toast('已加入列表「' + pl.level + ' ' + LEVEL_NAME[pl.level] + '」'); else toast(res.msg, true);
       }
     }
