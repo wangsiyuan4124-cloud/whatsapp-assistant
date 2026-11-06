@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.5.1
+// @version      1.5.2
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -759,27 +759,38 @@
   }
 
   /* ---------- 自动加入 WhatsApp Business 列表（A/B/C/D） ---------- */
+  // 聊天顶部的「添加到列表」按钮；加过列表后它会显示列表名（如「A 马上成交」）
   function findListButton() {
-    return [...document.querySelectorAll('#main header [role="button"], #main header button')]
-      .find((b) => /添加到列表|加入列表|Add to list/i.test(b.getAttribute('aria-label') || ''));
+    const cands = [...document.querySelectorAll('#main header [role="button"], #main header button')];
+    return cands.find((b) => /添加到列表|加入列表|Add to list|列表|list/i.test(b.getAttribute('aria-label') || '')) ||
+      cands.find((b) => /^\s*[ABCD](\s|级)/.test(b.innerText || ''));
   }
+  const menuEl = () => document.querySelector('[role="menu"]');
   async function openListMenu() {
     const btn = findListButton();
     if (!btn) return null;
-    btn.click();
+    if (!menuEl()) btn.click();
     for (let i = 0; i < 15; i++) {
       await sleep(100);
-      const m = document.querySelector('[role="menu"]');
+      const m = menuEl();
       if (m && m.querySelector('[role="menuitemcheckbox"]')) return m;
     }
     return null;
   }
-  function closeMenu() {
-    const m = document.querySelector('[role="menu"]');
-    if (!m) return;
-    const ev = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
-    (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', ev));
-    m.dispatchEvent(new KeyboardEvent('keydown', ev));
+  // 关闭菜单：绝不发送 Esc 键（WhatsApp 里 Esc 会把整个聊天关掉）。
+  // 先在插件自己的面板上模拟一次"点外面"，不行再点一次列表按钮把菜单收起。
+  async function closeMenu() {
+    for (let i = 0; i < 2 && menuEl(); i++) {
+      if (i === 0) {
+        const t = panel && panel.isConnected ? panel : document.documentElement;
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) =>
+          t.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window })));
+      } else {
+        const btn = findListButton();
+        if (btn) btn.click();
+      }
+      for (let k = 0; k < 6 && menuEl(); k++) await sleep(80);
+    }
   }
   const levelOfItem = (li) => {
     const m = (li.innerText || '').trim().match(/^([ABCD])(?:\s|级|$)/i);
@@ -788,21 +799,32 @@
   // chatName：开始时的聊天；中途发现切换了聊天就立即停止，避免标错人
   async function applyLevelList(level, chatName) {
     const stillSame = () => getChatName() === chatName;
-    for (let round = 0; round < 6; round++) {
-      if (!stillSame()) { closeMenu(); return { ok: false, msg: '聊天已切换，已停止加入列表，请回到该客户重新分析' }; }
+    const switched = { ok: false, msg: '聊天已切换，已停止加入列表，请回到该客户重新分析' };
+    for (let round = 0; round < 4; round++) {
+      if (!stillSame()) { await closeMenu(); return switched; }
       const menu = await openListMenu();
-      if (!menu) return { ok: false, msg: '没找到「添加到列表」按钮' };
-      if (!stillSame()) { closeMenu(); return { ok: false, msg: '聊天已切换，已停止加入列表，请回到该客户重新分析' }; }
-      const items = [...menu.querySelectorAll('[role="menuitemcheckbox"]')].filter(levelOfItem);
-      if (!items.length) { closeMenu(); return { ok: false, msg: '没找到 A/B/C/D 列表，请先在 WhatsApp 里建好' }; }
-      const wrong = items.find((li) => (levelOfItem(li) === level) !== (li.getAttribute('aria-checked') === 'true'));
-      if (!wrong) { closeMenu(); await sleep(150); closeMenu(); return { ok: true }; }
-      wrong.click();
-      await sleep(500);
-      closeMenu();
-      await sleep(250);
+      if (!menu) return { ok: false, msg: '没找到「添加到列表」按钮，请手动加入列表' };
+      if (!stillSame()) { await closeMenu(); return switched; }
+      const items = () => [...(menuEl() || menu).querySelectorAll('[role="menuitemcheckbox"]')].filter(levelOfItem);
+      if (!items().length) { await closeMenu(); return { ok: false, msg: '没找到 A/B/C/D 列表，请先在 WhatsApp 里建好' }; }
+      const isWrong = (li) => (levelOfItem(li) === level) !== (li.getAttribute('aria-checked') === 'true');
+      // 菜单开着的时候，把需要改的项依次点掉（菜单如果点一下就自动关了，就下一轮再开）
+      let clicked = 0;
+      while (menuEl() && clicked < 5) {
+        const wrong = items().find(isWrong);
+        if (!wrong) break;
+        wrong.click();
+        clicked++;
+        await sleep(400);
+      }
+      if (menuEl()) {
+        const done = !items().find(isWrong);
+        await closeMenu();
+        if (done) return { ok: true };
+      }
+      await sleep(300);
     }
-    closeMenu();
+    await closeMenu();
     return { ok: false, msg: '加入列表没有成功，请手动加入' };
   }
 
