@@ -1,0 +1,104 @@
+# WhatsApp 助手：项目交接说明
+
+这份文档写给接手开发的人（或 AI 编程助手）。读完它和 `whatsapp-assistant.user.js`，就能接着改。
+
+## 1. 这是什么
+
+一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
+
+当前版本：**v1.7.2**，一个文件，约 2100 行，没有构建步骤。
+
+## 2. 功能清单
+
+| 功能 | 说明 |
+|---|---|
+| 发送翻译 | 输入中文按回车，自动翻译成本聊天的语言后发送；Ctrl+Enter 只翻译不发送。翻译用谷歌免费接口，失败自动换微软 Edge 接口。中文输入法选词时的回车不拦截。 |
+| 接收翻译 | 对方发来的外语消息，在原文下方显示「译：中文」。选中任意文字可点「译成中文」。 |
+| 每个聊天单独记语言 | 手动选的优先；否则按对方最新消息自动识别。 |
+| 三栏布局 | 打开右栏时，把 WhatsApp 的 `#app` 宽度缩小，右边空出一栏（400px，可加宽到 650px）。状态会被记住。 |
+| 工具栏 | 三栏时放在右栏顶部；关闭右栏时浮动，可拖动（拖 🌐）、可收起（–）。 |
+| 客户分析 | **手动点「分析客户」才分析**（DeepSeek）。输出级别 A/B/C/D、个人还是经销商、理由、已知和还缺的信息、**1 条**建议回复、下一步。对话有新内容才会重新分析，否则提示「已是最新」。 |
+| 自动加入列表 | 分析后把聊天加入 WhatsApp Business 的「A 马上成交 / B 有需求 / C 了解中 / D 无效」列表（用户已在 WhatsApp 里建好）。 |
+| 建议回复操作 | 填入、和 AI 多轮修改（子页面，有「← 返回」）、换一条、收藏到话术库。 |
+| AI 助手 | 右栏第二个标签页。**独立对话，和客户无关**（像豆包 / DeepSeek App），有新对话、历史、加宽、「📎 引用当前客户聊天」（只附在下一条提问）。纯文本回答；只有用户明确要回复客户时，才用【可发给客户】…【/可发给客户】标记附上可填入的回复。 |
+| PI 形式发票 | AI 从聊天提取 → 右栏表单（缺的标黄）→ 预览 → 生成 A4 PDF 加一张 JPG → 粘贴进 WhatsApp 发送预览（不会自动发送）。英文版和西语版，金额大写，编号 `PI-YYYYMMDD-NNN`，按客户存草稿。开票公司：BOUNDLESS AUTOMOTIVE LIMITED（無界汽車有限公司，香港）。 |
+| 设置 | ⚙ 打开，三个标签页：基本设置（DeepSeek Key、业务介绍、价格表与交易条款、分级标准、自动加入列表开关）、PI 发票（公司、银行、Logo、公章、默认条款）、话术库。 |
+
+## 3. 代码结构（按文件里的分节注释）
+
+- 配置、存储、翻译接口（谷歌 / 微软）
+- WhatsApp 页面元素：`getInput`、`getChatName`、`replaceInputText`、`clickSend`
+- 发送翻译核心流程、选中翻译、接收翻译（`scanIncoming`，MutationObserver + 定时兜底）
+- 悬浮工具栏 `ui`（`ui.position` 每 500ms 执行一次：三栏时贴在右栏的 `#wat-barslot` 位置）
+- **客户分析模块**：`baseContext`、`buildPrompt`、`callDeepSeek`（带重试和宽松 JSON 解析）、`applyLevelList`、`showPanel`、状态行 `setStatus` / `panelNotice`、`convFingerprint`、`renderResult`、`openRefine`、`anotherSuggestion`、AI 助手 `openAsk` / `renderHistory`、`analyzeCurrent`、`syncPanel`、设置面板 `openSettings(tab)`
+- **PI 模块**：`renderPiPage`（全部内联样式，794px 宽）、`makePiFiles`（html2canvas 生成图片，再用 jsPDF 生成 PDF）、`attachToChat`、`extractPiFromChat`、`renderPiEditor`、`piSettingsSection`
+- 工具栏拖动、启动
+
+依赖：通过 `@require` 从 cdnjs 加载 html2canvas 1.4.1 和 jsPDF 2.5.1。`@connect` 允许访问谷歌翻译、微软翻译、api.deepseek.com。
+
+### 存储（GM_setValue，只存在用户这台电脑的 Chrome 里）
+
+`dsKey`（API Key）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`、`enabled`。
+
+**仓库是公开的**：代码里绝不能放 API Key、银行信息、公章或 Logo 图片。
+
+## 4. 依赖的 WhatsApp 页面元素（2026-11 实测）
+
+- 当前聊天：`#main`；聊天名：`#main header span[dir="auto"]`（`title` 属性）
+- 输入框：`#main footer div[contenteditable="true"]`（Lexical 编辑器）
+- 发送按钮：`#main footer button[aria-label="发送"]`（中文界面；没有 `data-icon`）
+- 消息行：`[data-testid^="conv-msg-"]`；气泡：`[data-testid="msg-container"]`；正文：`.copyable-text [data-testid="selectable-text"]`；时间和发送人：`.copyable-text[data-pre-plain-text]`，格式是 `[下午4:07, 2026年11月5日] 名字: `
+- 区分收发：消息里的 `[data-icon="tail-in"]` / `tail-out`（只有一组连续消息的第一条有），没有的话按气泡偏左还是偏右判断
+- 引用回复里被引用的那条：在 `[role="button"]` 里，要跳过
+- 聊天列表：`#pane-side [role="row"]`，标题 `[data-testid="cell-frame-title"] span[title]`
+- 列表按钮：聊天顶部 `aria-label="添加到列表"`，加过列表后按钮上显示列表名。菜单是 `[role="menu"]`，选项是 `li[role="menuitemcheckbox"]`（`aria-checked`）
+- 附件：在输入框上触发 `paste` 事件，`clipboardData` 里放 File（可以多个），WhatsApp 会打开发送预览。PDF 在预览里显示「暂无预览」，所以同时附一张 JPG。
+
+## 5. 踩过的坑（一定要遵守）
+
+1. **绝不能发送 Esc 键事件**。在 WhatsApp 里 Esc 会关闭当前聊天。关列表菜单的方法是：在插件自己的面板上模拟一次「点外面」，不行再点一次列表按钮。
+2. **Tampermonkey 沙箱里 `window` 不是真正的 Window**。`new MouseEvent(type, { view: window })` 会直接报错。不要传 `view`；测试要用沙箱模拟（见 `tests/t08`、`t09` 的写法）。
+3. **Lexical 输入框替换文字**：先选中全部内容，等约 40ms（Lexical 是异步同步选区的），再触发 `paste` 事件；不行再用 `execCommand('insertText')`。替换后要核对内容是否正确。
+4. 「填入」或翻译后会记下 `lastTranslated`，按回车时不会再翻译一遍。
+5. DeepSeek 的 JSON 模式偶尔返回空内容，或者在 JSON 外面加说明文字。`callDeepSeek` 会宽松解析并重试一次。AI 助手用纯文本模式（`{ json: false }`）。
+6. GitHub 的 raw 下载地址有大约 5 分钟缓存。发布后要确认 raw 地址拿到的已经是新版本号，再通知用户更新。
+7. AI 翻译时要忠实原文、保留人称（曾经把「Can I give you an estimate」翻成「能给我报价吗」）。
+
+## 6. 产品决定和用户偏好
+
+- 界面和说明都用中文；**不要弹窗挡住聊天**，提示放在右栏顶部状态行（成功类 4 秒消失，出错的手动关掉）。
+- 分析**只在手动点击时进行**（试过自动分析，用户不要）。
+- 建议回复**只给 1 条**。
+- AI 助手**不加常用问题的快捷按钮**；只做用户让它做的事，不主动给销售建议。
+- 价格、付款、交期、库存等数字只能来自设置里的「价格表与交易条款」，没有就不编。
+- 子页面要有「← 返回」；右上角 × 是关闭整个右栏。
+- 用户说「先探讨」时，先讨论方案，确认后再写代码。
+
+## 7. 发布流程
+
+1. 改 `whatsapp-assistant.user.js`，**同时把 `@version` 加一**。
+2. 跑测试：`cd tests && npm install && npx playwright install chromium && npm test`，核对输出。
+3. 提交并推送到 `main`。
+4. 确认 `https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js` 里的 `@version` 已经是新版本。
+5. 用户在 Chrome 打开上面这个链接，在 Tampermonkey 页面点「更新 / Overwrite」，再刷新 WhatsApp。
+
+## 8. 测试（tests/ 目录）
+
+- `app.js` 用 Lexical 搭了一个模拟输入框（`npm run build` 打包成 `app.bundle.js`）。`page*.html` 是逐步加了功能的模拟 WhatsApp 页面：消息行、列表菜单、`GM_*` 函数、模拟的翻译和 DeepSeek 返回。
+- `page6.html` 起，模拟页面会把「按 Esc 关聊天」计数（`chatClosed`）。`#keep` 参数模拟「点菜单项后菜单不关」的情况。
+- `t01`–`t09` 是 Playwright 脚本，输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
+- 环境变量 `SCRIPT` 可以指定要测的脚本文件。
+- 模拟页面测不出 WhatsApp 改版的影响，重要改动发布后要请用户在真实页面上确认一次。
+
+## 9. 待办和想法
+
+- [ ] 「导出 / 导入全部设置」：备份 Key、PI 资料、话术库，方便换电脑（之前提过，用户还没确认）。
+- [ ] 批量分析：依次打开没分析过的聊天并分析（讨论过，还没做）。
+- [ ] 纠错词库：比如客户把 price 写成 prize。讨论过但用户还没拍板，曾有半成品，已撤回。
+- [ ] 公章图片是从 MAF 扫描件里抠出来的，有几处浅色条纹。用户可以在白纸上重新盖章拍照，再重新处理。
+- [ ] 以后计划：WhatsApp 官方 API（共存模式）加服务器上的自动回复机器人，复用同一套分级标准和话术库。这部分适合单独建一个后端项目。
+
+## 10. 用户本地文件
+
+- `D:\WhatsApp插件\`：脚本副本、`boundless-seal.png`（公章，已上传到插件设置）、`boundless-logo-pi.png`（Logo，已上传到插件设置）、`Boundless-Logo.zip`、`PI示例（测试数据）.pdf`
+- `D:\威麟\`：公司资料（银行等信息由用户自己在插件设置里填写）
