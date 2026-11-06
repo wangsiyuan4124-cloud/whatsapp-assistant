@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.0
+// @version      1.7.1
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -735,35 +735,56 @@
     return { system, user: convText(conv, chatName) };
   }
 
-  function callDeepSeek(messages, maxTokens) {
+  // opts.json=false：普通文字回答（AI 助手用）；默认要求 JSON
+  function deepSeekOnce(messages, maxTokens, json) {
     return new Promise((resolve, reject) => {
+      const body = { model: 'deepseek-chat', messages, temperature: json ? 0.4 : 0.6, max_tokens: maxTokens || 1500 };
+      if (json) body.response_format = { type: 'json_object' };
       GM_xmlhttpRequest({
         method: 'POST',
         url: 'https://api.deepseek.com/chat/completions',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ai.apiKey },
-        data: JSON.stringify({
-          model: 'deepseek-chat',
-          messages,
-          response_format: { type: 'json_object' },
-          temperature: 0.4,
-          max_tokens: maxTokens || 1500,
-        }),
-        timeout: 90000,
+        data: JSON.stringify(body),
+        timeout: 120000,
         onload: (r) => {
           if (r.status === 401) return reject(new Error('API Key 不正确，请在设置里检查'));
           if (r.status === 402) return reject(new Error('DeepSeek 账户余额不足，请充值'));
+          if (r.status === 429) return reject(new Error('请求太频繁，请稍等几秒再试'));
           if (r.status < 200 || r.status >= 300) return reject(new Error('DeepSeek 返回错误 HTTP ' + r.status));
           try {
             const data = JSON.parse(r.responseText);
-            const txt = data.choices[0].message.content;
-            resolve({ json: JSON.parse(txt.replace(/^```(json)?|```$/g, '').trim()), raw: txt });
-          } catch (e) { reject(new Error('AI 返回的内容无法解析，请重试')); }
+            resolve({ txt: String((data.choices[0].message && data.choices[0].message.content) || ''), finish: data.choices[0].finish_reason });
+          } catch (e) { reject(new Error('DeepSeek 返回的数据格式不对')); }
         },
         onerror: () => reject(new Error('连不上 DeepSeek，请检查网络')),
         ontimeout: () => reject(new Error('DeepSeek 响应超时，请重试')),
       });
     });
   }
+  function parseJsonLoose(txt) {
+    const t = String(txt || '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '').trim();
+    try { return JSON.parse(t); } catch (e) { /* 继续尝试 */ }
+    const m = t.match(/\{[\s\S]*\}/);
+    if (m) { try { return JSON.parse(m[0]); } catch (e) { /* ignore */ } }
+    return null;
+  }
+  async function callDeepSeek(messages, maxTokens, opts) {
+    const json = !(opts && opts.json === false);
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) { // 偶尔返回空内容或格式不对，自动重试一次
+      const { txt, finish } = await deepSeekOnce(messages, maxTokens, json);
+      if (!json) {
+        if (txt.trim()) return { text: txt, raw: txt, truncated: finish === 'length' };
+        lastErr = new Error('AI 没有返回内容，请重试');
+        continue;
+      }
+      const obj = parseJsonLoose(txt);
+      if (obj) return { json: obj, raw: txt };
+      lastErr = new Error(finish === 'length' ? 'AI 回答太长被截断了，请把问题拆小一点' : 'AI 返回的内容无法解析，请重试');
+    }
+    throw lastErr;
+  }
+
 
   function normalizeResult(r) {
     r = r || {};
@@ -1216,17 +1237,29 @@
   function assistantSystem() {
     const prices = ai.prices.trim();
     return [
-      '你是一个全能的 AI 助手，像豆包、DeepSeek 一样可以回答各种问题。用户是一位中国汽车出口经销商，熟悉他的业务有助于你回答：',
-      '【他的业务】' + ai.biz,
-      '【他的价格表与交易条款】' + (prices || '（未填写）'),
-      '【回答要求】',
-      '- 默认用中文回答，用户用别的语言提问就用那种语言回答。先给结论再展开，清楚实用。不要使用 Markdown 的 # 标题和 ** 加粗。',
-      '- 关税、法规、汇率、海运时效等外部信息只能给一般性参考，提醒以官方或货代确认为准；不知道就直说，不要编。',
-      '- 用户引用了某个客户的 WhatsApp 聊天时，结合那段聊天回答；涉及价格、付款、交期等具体条件，只用上面价格表里有的，没有的不要编数字。',
-      '- 如果回答里有建议直接发给客户的一段话，放进 reply 字段（用客户的语言），reply_zh 放中文意思；没有就留空字符串。',
-      '- 只输出 JSON：{"answer":"回答正文","reply":"","reply_zh":""}',
+      '你是一个通用 AI 助手，像豆包、DeepSeek 一样，什么问题都可以回答。',
+      '【用户背景，仅在问题和他的生意有关时参考】他是中国汽车出口经销商。' + ai.biz + (prices ? '\n他的价格表与交易条款：' + prices : ''),
+      '【回答规则】',
+      '1. 严格按用户这句话的要求回答，只做他让你做的事，不要自作主张给销售建议、不要主动替他写回复。',
+      '2. 用户只粘贴了一段文字、没说要做什么时：如果是外语，就翻译成中文；如果是中文，就简要概括。然后用一句话问他需要怎么处理。不要分析、不要给建议。',
+      '3. 默认用中文回答；先给结论，简洁实用。不要使用 Markdown 的 # 标题和 ** 加粗。',
+      '4. 关税、法规、汇率、海运时效、地理位置等外部信息，按你所知回答；不确定的要说明，涉及钱和法规的提醒以官方或货代确认为准，不要编造。',
+      '5. 用户引用了客户的 WhatsApp 聊天时，结合那段聊天回答他的问题。涉及价格、付款、交期等具体条件，只用上面价格表里有的，没有的不要编数字。',
+      '6. 只有当用户明确要你写一段发给客户的话（比如"帮我回复他""怎么回""写一段话发给他"）时，才在回答最后附上：',
+      '【可发给客户】这里放用客户语言写的原文【/可发给客户】',
+      '【中文】这里放中文意思【/中文】',
+      '   其他情况不要输出这两个标记。',
     ].join('\n');
   }
+  // 从 AI 的文字回答里拆出"可发给客户"的部分
+  function splitAnswer(txt) {
+    const t = String(txt || '');
+    const r = t.match(/【可发给客户】([\s\S]*?)【\/可发给客户】/);
+    const z = t.match(/【中文】([\s\S]*?)【\/中文】/);
+    const answer = t.replace(/【可发给客户】[\s\S]*?【\/可发给客户】/g, '').replace(/【中文】[\s\S]*?【\/中文】/g, '').replace(/\*\*/g, '').replace(/^#+\s*/gm, '').trim();
+    return { answer, reply: r ? r[1].trim() : '', reply_zh: z ? z[1].trim() : '' };
+  }
+
 
   function openAsk() {
     panelChat = getChatName() || '';
@@ -1299,9 +1332,10 @@
         const msgs = [{ role: 'system', content: assistantSystem() }];
         chat.msgs.slice(-24).forEach((m) => msgs.push(m.role === 'user'
           ? { role: 'user', content: (m.ctx ? '【我引用的客户聊天】\n' + m.ctx + '\n\n【我的问题】\n' : '') + m.content }
-          : { role: 'assistant', content: JSON.stringify({ answer: m.answer || '', reply: m.reply || '', reply_zh: m.reply_zh || '' }) }));
-        const { json } = await callDeepSeek(msgs, 2000);
-        const ans = { role: 'assistant', answer: String((json && json.answer) || '（AI 没有给出回答）'), reply: (json && json.reply) || '', reply_zh: (json && json.reply_zh) || '', at: Date.now() };
+          : { role: 'assistant', content: m.raw || m.answer || '' }));
+        const res = await callDeepSeek(msgs, 3000, { json: false });
+        const parts = splitAnswer(res.text);
+        const ans = { role: 'assistant', raw: res.text, answer: parts.answer + (res.truncated ? '\n\n（回答太长被截断了，可以说"继续"）' : ''), reply: parts.reply, reply_zh: parts.reply_zh, at: Date.now() };
         const c2 = chats.get(chatId) || chat;
         c2.msgs.push(ans); c2.at = Date.now(); chats.put(c2); chat = c2;
         wait.remove();
