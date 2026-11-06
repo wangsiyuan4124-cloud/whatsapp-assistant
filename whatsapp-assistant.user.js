@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.1
+// @version      1.7.2
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -738,7 +738,7 @@
   // opts.json=false：普通文字回答（AI 助手用）；默认要求 JSON
   function deepSeekOnce(messages, maxTokens, json) {
     return new Promise((resolve, reject) => {
-      const body = { model: 'deepseek-chat', messages, temperature: json ? 0.4 : 0.6, max_tokens: maxTokens || 1500 };
+      const body = { model: 'deepseek-chat', messages, temperature: json ? 0.4 : 0.3, max_tokens: maxTokens || 1500 };
       if (json) body.response_format = { type: 'json_object' };
       GM_xmlhttpRequest({
         method: 'POST',
@@ -1238,10 +1238,12 @@
     const prices = ai.prices.trim();
     return [
       '你是一个通用 AI 助手，像豆包、DeepSeek 一样，什么问题都可以回答。',
-      '【用户背景，仅在问题和他的生意有关时参考】他是中国汽车出口经销商。' + ai.biz + (prices ? '\n他的价格表与交易条款：' + prices : ''),
+      '【用户背景，仅在问题和他的生意有关时参考；不要因为这个背景去改变任何原文的意思】他是中国汽车出口经销商。' + ai.biz + (prices ? '\n他的价格表与交易条款：' + prices : ''),
       '【回答规则】',
       '1. 严格按用户这句话的要求回答，只做他让你做的事，不要自作主张给销售建议、不要主动替他写回复。',
       '2. 用户只粘贴了一段文字、没说要做什么时：如果是外语，就翻译成中文；如果是中文，就简要概括。然后用一句话问他需要怎么处理。不要分析、不要给建议。',
+      '2.1 翻译时必须忠实原文：逐句翻译，严格保留人称和谁对谁做什么（I/you/we、给/要、问/答），不要根据上下文或常识去猜测、"纠正"或改写意思。原文有歧义或语病时，照字面翻译，再用一句话单独注明可能的其他理解。',
+      '2.2 用户说你翻译错了时，先逐句对照原文检查哪里错了、说明错在哪，再给出改正后的译文；不要只是换个说法重复。',
       '3. 默认用中文回答；先给结论，简洁实用。不要使用 Markdown 的 # 标题和 ** 加粗。',
       '4. 关税、法规、汇率、海运时效、地理位置等外部信息，按你所知回答；不确定的要说明，涉及钱和法规的提醒以官方或货代确认为准，不要编造。',
       '5. 用户引用了客户的 WhatsApp 聊天时，结合那段聊天回答他的问题。涉及价格、付款、交期等具体条件，只用上面价格表里有的，没有的不要编数字。',
