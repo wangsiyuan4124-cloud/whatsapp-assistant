@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.5.3
+// @version      1.6.0
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -483,6 +483,16 @@
   #wat-settings button.ws-tab{background:#f0f2f5;color:#3b4a54}#wat-settings button.ws-tab.on{background:#0f2a44;color:#fff}
   .ws-save{position:sticky;bottom:-16px;background:#fff;padding:8px 0}
   #wat-panel button.wp-back{background:#f0f2f5;color:#3b4a54;padding:3px 10px}
+  .wp-tabs{display:flex;gap:0;border-bottom:1px solid #e9edef;flex:none;padding:0 14px}
+  #wat-panel button.wp-tab{background:none;color:#667781;border-radius:0;padding:8px 14px;font-size:13px;border-bottom:2px solid transparent}
+  #wat-panel button.wp-tab.on{color:#0f2a44;font-weight:600;border-bottom-color:#25d366}
+  #wat-panel .wp-body.ask{display:flex;flex-direction:column;overflow:hidden;padding-bottom:10px}
+  .ask-thread{flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px 0 8px}
+  .ask-me{align-self:flex-end;background:#d9fdd3;border-radius:10px;padding:6px 10px;max-width:88%;white-space:pre-wrap}
+  .ask-ai{align-self:flex-start;background:#f0f2f5;border-radius:10px;padding:8px 10px;max-width:94%;white-space:pre-wrap}
+  .ask-reply{margin-top:8px;background:#fff;border:1px solid #d1d7db;border-radius:8px;padding:6px 8px}
+  .ask-input{display:flex;gap:6px;align-items:flex-end;flex:none;border-top:1px solid #e9edef;padding-top:8px}
+  .ask-input textarea{flex:1;box-sizing:border-box;border:1px solid #d1d7db;border-radius:8px;padding:6px 8px;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;resize:none}
   .wp-status{padding:6px 14px;border-bottom:1px solid #e9edef;font-size:12px;flex:none}
   .wp-status .ws-line{display:flex;align-items:center;gap:6px;color:#54656f}
   .wp-status .ws-line.ok{color:#0b6b3a}.wp-status .ws-line.busy{color:#027eb5}.wp-status .ws-line.warn{color:#9a6700}
@@ -706,7 +716,7 @@
     const system = baseContext() + '\n\n' + [
       '【本次任务：分析客户并给出回复建议】',
       '1. 只根据聊天内容判断，没提到的信息填"未知"，不要猜。',
-      '2. 给 2～3 条思路不同的建议回复（每条不超过 60 个单词），每条都要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。如果最后一条是我方发的、客户还没回，就给跟进话术。',
+      '2. 只给 1 条你认为此刻最合适的建议回复（不超过 60 个单词），要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。如果最后一条是我方发的、客户还没回，就给跟进话术。',
       '2.1 建议必须接着聊天的最新进展往下走：客户已经回答过的问题不要再问，我方已经发过的话不要重复或换个说法再发；最重要的是回应客户最新的一条消息。',
       '3. 只输出 JSON，不要任何其他文字。格式：',
       '{"level":"A|B|C|D","customer_type":"个人|经销商|未知","language":"客户语言，如 English/Español",' +
@@ -753,7 +763,7 @@
     r.level = 'ABCD'.includes(lv) && lv ? lv : 'C';
     r.known = r.known && typeof r.known === 'object' ? r.known : {};
     r.missing = Array.isArray(r.missing) ? r.missing : [];
-    r.suggestions = Array.isArray(r.suggestions) ? r.suggestions.filter((s) => s && s.reply).slice(0, 3) : [];
+    r.suggestions = Array.isArray(r.suggestions) ? r.suggestions.filter((s) => s && s.reply).slice(0, 1) : [];
     r.next_followup = r.next_followup || {};
     return r;
   }
@@ -866,8 +876,14 @@
       h('span', { class: 'wp-sub' }, panelChat),
       h('button', { class: 'wp-x', title: '关闭整个右栏', onclick: () => dock(false) }, '×')));
     panel.appendChild(h('div', { class: 'wp-slot', id: 'wat-barslot' }));
+    if (!sub && panelChat) {
+      lastTab = panelView === 'ask' ? 'ask' : 'result';
+      panel.appendChild(h('div', { class: 'wp-tabs' },
+        h('button', { class: 'wp-tab' + (lastTab === 'result' ? ' on' : ''), onclick: () => { if (panelView !== 'result') backToResult(); } }, '客户分析'),
+        h('button', { class: 'wp-tab' + (lastTab === 'ask' ? ' on' : ''), onclick: () => { if (panelView !== 'ask') openAsk(); } }, '问 AI')));
+    }
     panel.appendChild(statusEl);
-    panel.appendChild(h('div', { class: 'wp-body' }, content));
+    panel.appendChild(h('div', { class: 'wp-body' + (panelView === 'ask' ? ' ask' : '') }, content));
     renderStatus();
     dock(true);
   }
@@ -954,6 +970,7 @@
     if (!r.suggestions.length) box.appendChild(h('div', { class: 'wp-muted' }, 'AI 没有给出建议，请重试'));
     r.suggestions.forEach((s) => {
       const saveBtn = h('button', { class: 'sec', onclick: () => savePb(s.reply, s.reply_zh, s.scene, r.level, saveBtn) }, '☆ 收藏');
+      const altBtn = h('button', { class: 'sec', onclick: () => anotherSuggestion(s, r, altBtn) }, '↻ 换一条');
       box.appendChild(h('div', { class: 'wp-sug' },
         h('div', { class: 'wp-goal' }, (s.scene ? '【' + s.scene + '】' : '') + (s.goal || '')),
         h('div', { class: 'wp-reply' }, String(s.reply)),
@@ -961,7 +978,7 @@
         h('div', { class: 'wp-btns' },
           h('button', { onclick: () => fillInput(s.reply) }, '填入'),
           h('button', { class: 'sec', onclick: () => openRefine(s, r) }, '✎ 和 AI 改一改'),
-          saveBtn)));
+          altBtn, saveBtn)));
     });
 
     const nf = r.next_followup || {};
@@ -1146,6 +1163,131 @@
     }
   }
 
+  let lastTab = 'result';
+
+  /* ---------- 换一条建议 ---------- */
+  async function anotherSuggestion(s, r, btn) {
+    const name = getChatName();
+    if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
+    const old = btn.textContent; btn.disabled = true; btn.textContent = '生成中…';
+    try {
+      const { system, user } = buildPrompt(readConversation(60), name);
+      const { json } = await callDeepSeek([
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+        { role: 'user', content: '换一个思路，重新给 1 条建议回复，不要和这条相同或相近：\n' + s.reply +
+          '\n只输出 JSON：{"scene":"场景，中文","goal":"目的，中文","reply":"客户语言的回复","reply_zh":"中文意思"}' },
+      ], 600);
+      const ns = json && (json.reply ? json : (json.suggestions && json.suggestions[0]));
+      if (!ns || !ns.reply) throw new Error('AI 没有给出新的建议，请再试一次');
+      const all = ai.analyses();
+      if (all[name]) {
+        all[name].result.suggestions = [ns];
+        store.set('analyses', all);
+        if (getChatName() === name && panelView === 'result') showPanel(renderResult(normalizeResult(all[name].result), all[name].at));
+      }
+    } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = old; }
+  }
+
+  /* ---------- 问 AI（右栏第二个标签页） ---------- */
+  const askStore = {
+    get(name) { return (store.get('askHistory', {})[name]) || []; },
+    set(name, list) { const all = store.get('askHistory', {}); all[name] = list.slice(-40); store.set('askHistory', all); },
+  };
+  function askSystem(chatName) {
+    const conv = readConversation(60);
+    const saved = ai.analyses()[chatName];
+    const r = saved && saved.result;
+    const summary = r ? ('级别 ' + r.level + ' ' + (LEVEL_NAME[r.level] || '') + '；' + (r.customer_type || '') + '；' + (r.reason || '') +
+      '；已知：' + Object.entries(r.known || {}).filter(([, v]) => v && !/^未知|unknown$/i.test(String(v))).map(([k, v]) => k + '=' + v).join('，') +
+      '；还缺：' + (r.missing || []).join('、')) : '（还没有分析）';
+    return baseContext() + '\n\n' + [
+      '【本次任务：做销售的参谋】你正在帮这位销售处理当前这个 WhatsApp 客户，回答他的问题，帮助他做决定。',
+      '- 用中文回答，先给结论再给理由，简洁实用，可以分点。不要使用 Markdown 标题和加粗符号。',
+      '- 问题和当前客户有关时，结合下面的聊天记录和分析来回答；和客户无关的一般问题就直接回答。',
+      '- 关税、法规、海运时效等外部信息只能给一般性参考，并提醒以官方或货代的确认为准。',
+      '- 如果回答里包含建议发给客户的一段话，把它放在 reply 字段（用客户的语言），reply_zh 放中文意思；没有就留空。',
+      '- 只输出 JSON：{"answer":"中文回答","reply":"","reply_zh":""}',
+      '',
+      '【当前客户分析】' + summary,
+      convText(conv, chatName),
+    ].join('\n');
+  }
+  function openAsk() {
+    const chatName = getChatName();
+    if (!chatName) { toast('请先打开客户聊天', true); return; }
+    panelChat = chatName;
+    panelView = 'ask';
+    lastTab = 'ask';
+    const thread = h('div', { class: 'ask-thread' });
+    const input = h('textarea', { rows: '2', placeholder: '问点什么，比如：这个客户值得报低价吗？（Enter 发送，Shift+Enter 换行）' });
+    const sendBtn = h('button', null, '发送');
+    const addBubble = (m) => {
+      if (m.role === 'user') { thread.appendChild(h('div', { class: 'ask-me' }, m.content)); return; }
+      const b = h('div', { class: 'ask-ai' + (m.err ? ' wr-err' : '') }, String(m.answer || m.content || '').replace(/\*\*/g, ''));
+      if (m.reply) {
+        const saveBtn = h('button', { class: 'sec' }, '☆ 收藏');
+        saveBtn.onclick = () => savePb(m.reply, m.reply_zh, '问 AI', '', saveBtn);
+        b.appendChild(h('div', { class: 'ask-reply' },
+          h('div', { class: 'wp-goal' }, '建议发给客户：'),
+          h('div', { class: 'wp-reply' }, m.reply),
+          m.reply_zh ? h('div', { class: 'wp-zh' }, '中文：' + m.reply_zh) : null,
+          h('div', { class: 'wp-btns' }, h('button', { onclick: () => fillInput(m.reply) }, '填入'), saveBtn)));
+      }
+      thread.appendChild(b);
+    };
+    const history = askStore.get(chatName);
+    if (!history.length) thread.appendChild(h('div', { class: 'wp-muted', style: 'text-align:center;padding:16px 0' },
+      'AI 已经看过这位客户的聊天记录和分析，也知道你的业务和价格条款。有什么需要拿主意的，直接问。'));
+    history.forEach(addBubble);
+
+    async function send() {
+      const q = input.value.trim();
+      if (!q) { input.focus(); return; }
+      if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
+      if (getChatName() !== chatName) { toast('聊天已切换，请重新提问', true); return; }
+      input.value = '';
+      const hist = askStore.get(chatName);
+      const userMsg = { role: 'user', content: q, at: Date.now() };
+      hist.push(userMsg); askStore.set(chatName, hist);
+      if (thread.firstChild && thread.firstChild.classList.contains('wp-muted')) thread.innerHTML = '';
+      addBubble(userMsg);
+      const wait = h('div', { class: 'ask-ai wp-muted' }, 'AI 正在思考…');
+      thread.appendChild(wait); thread.scrollTop = thread.scrollHeight;
+      sendBtn.disabled = true;
+      try {
+        const msgs = [{ role: 'system', content: askSystem(chatName) }];
+        hist.slice(-20).forEach((m) => msgs.push(m.role === 'user'
+          ? { role: 'user', content: m.content }
+          : { role: 'assistant', content: JSON.stringify({ answer: m.answer || '', reply: m.reply || '', reply_zh: m.reply_zh || '' }) }));
+        const { json } = await callDeepSeek(msgs, 1200);
+        const ans = { role: 'assistant', answer: String((json && json.answer) || '（AI 没有给出回答）'), reply: (json && json.reply) || '', reply_zh: (json && json.reply_zh) || '', at: Date.now() };
+        const h2 = askStore.get(chatName); h2.push(ans); askStore.set(chatName, h2);
+        wait.remove();
+        if (getChatName() === chatName && panelView === 'ask') addBubble(ans);
+      } catch (e) {
+        wait.className = 'ask-ai wr-err'; wait.textContent = '失败：' + e.message;
+        const h2 = askStore.get(chatName); if (h2.length && h2[h2.length - 1] === userMsg || (h2.length && h2[h2.length - 1].role === 'user')) { h2.pop(); askStore.set(chatName, h2); }
+      } finally {
+        sendBtn.disabled = false;
+        thread.scrollTop = thread.scrollHeight;
+      }
+    }
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
+    });
+    const clearBtn = h('button', { class: 'sec', title: '清空和 AI 的这段对话' }, '清空');
+    clearBtn.onclick = () => { if (confirmInline(null, '将清空这位客户的问 AI 记录')) { askStore.set(chatName, []); openAsk(); } };
+    const box = h('div', { style: 'display:flex;flex-direction:column;height:100%;min-height:0' },
+      thread,
+      h('div', { class: 'ask-input' }, input, h('div', { style: 'display:flex;flex-direction:column;gap:4px' }, sendBtn, clearBtn)));
+    setStatus('');
+    showPanel(box, '客户分析');
+    thread.scrollTop = thread.scrollHeight;
+    input.focus();
+  }
+
   // 分析结果是否过期：只提示，不自动分析（由你点「分析客户」更新）
   function staleStatus(saved) {
     if (!saved) { setStatus(''); return; }
@@ -1189,8 +1331,9 @@
     }
     if (name === panelChat) return;
     panelChat = name;
-    panelView = 'result';
     notice = null;
+    if (lastTab === 'ask') { setStatus(''); openAsk(); return; }
+    panelView = 'result';
     const saved = ai.analyses()[name];
     if (saved) {
       showPanel(renderResult(normalizeResult(saved.result), saved.at));
