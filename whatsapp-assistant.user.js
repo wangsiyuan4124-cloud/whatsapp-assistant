@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.4.1
+// @version      1.5.0
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -212,7 +212,6 @@
       if (andSend) {
         await sleep(120);
         if (!clickSend()) toast('未找到发送按钮，请手动按回车', true);
-        else toast('已发送（' + lang.toUpperCase() + '）：' + res.text + '\n原文：' + original);
       } else {
         toast('已翻译为 ' + lang.toUpperCase() + '，检查后按回车发送');
       }
@@ -421,7 +420,7 @@
   #wat-bar.in-panel #wat-handle,#wat-bar.in-panel #wat-min{display:none}
   .wp-slot{flex:none}
   #wat-bar .wat-off{background:#8696a0}
-  #wat-toast{position:fixed;z-index:10000;left:50%;bottom:90px;transform:translateX(-50%);max-width:60vw;white-space:pre-wrap;
+  #wat-toast{position:fixed;z-index:10000;right:16px;bottom:16px;max-width:360px;white-space:pre-wrap;
     background:#111b21;color:#fff;padding:8px 14px;border-radius:10px;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;
     box-shadow:0 4px 14px rgba(0,0,0,.25);display:none}
   #wat-toast.err{background:#c62828}
@@ -483,6 +482,11 @@
   .ws-tabs{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #e9edef;padding-bottom:8px;margin-bottom:4px}
   #wat-settings button.ws-tab{background:#f0f2f5;color:#3b4a54}#wat-settings button.ws-tab.on{background:#0f2a44;color:#fff}
   .ws-save{position:sticky;bottom:-16px;background:#fff;padding:8px 0}
+  .wp-status{padding:6px 14px;border-bottom:1px solid #e9edef;font-size:12px;flex:none}
+  .wp-status .ws-line{display:flex;align-items:center;gap:6px;color:#54656f}
+  .wp-status .ws-line.ok{color:#0b6b3a}.wp-status .ws-line.busy{color:#027eb5}.wp-status .ws-line.warn{color:#9a6700}
+  .wp-status .ws-line.err{color:#c62828;background:#fdecea;border-radius:6px;padding:3px 6px;margin-top:3px}
+  #wat-panel button.ws-close{background:none;color:#c62828;padding:0 4px;margin-left:auto;font-size:14px}
   .pi-warn{background:#fff4d6;border:1px solid #e8c46a;border-radius:8px;padding:6px 8px;margin:6px 0;font-size:12px}
   #wat-chip{position:fixed;z-index:10000;display:none;max-width:420px;padding:6px 10px;border-radius:10px;
     font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.2);cursor:pointer;white-space:pre-wrap}
@@ -517,6 +521,7 @@
   document.documentElement.appendChild(toastEl);
   let toastTimer;
   function toast(msg, isErr) {
+    try { if (typeof panelNotice === 'function' && panelNotice(msg, isErr)) return; } catch (e) { /* 面板还没初始化 */ }
     toastEl.textContent = msg;
     toastEl.className = isErr ? 'err' : '';
     toastEl.style.display = 'block';
@@ -642,9 +647,9 @@
     },
     savePlaybook(pb) { store.set('playbook', pb); },
     analyses() { return store.get('analyses', {}); },
-    saveAnalysis(name, result) {
+    saveAnalysis(name, result, fp) {
       const all = ai.analyses();
-      all[name] = { level: result.level, result, at: Date.now() };
+      all[name] = { level: result.level, result, at: Date.now(), fp: fp || '' };
       store.set('analyses', all);
     },
   };
@@ -701,6 +706,7 @@
       '【本次任务：分析客户并给出回复建议】',
       '1. 只根据聊天内容判断，没提到的信息填"未知"，不要猜。',
       '2. 给 2～3 条思路不同的建议回复（每条不超过 60 个单词），每条都要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。如果最后一条是我方发的、客户还没回，就给跟进话术。',
+      '2.1 建议必须接着聊天的最新进展往下走：客户已经回答过的问题不要再问，我方已经发过的话不要重复或换个说法再发；最重要的是回应客户最新的一条消息。',
       '3. 只输出 JSON，不要任何其他文字。格式：',
       '{"level":"A|B|C|D","customer_type":"个人|经销商|未知","language":"客户语言，如 English/Español",' +
         '"reason":"一句话中文理由","known":{"国家":"","车型":"","数量":"","预算":"","付款方式":"","购买时间":""},' +
@@ -834,9 +840,57 @@
       h('span', { class: 'wp-sub' }, panelChat),
       h('button', { class: 'wp-x', title: '关闭第三栏', onclick: () => dock(false) }, '×')));
     panel.appendChild(h('div', { class: 'wp-slot', id: 'wat-barslot' }));
+    panel.appendChild(statusEl);
     panel.appendChild(h('div', { class: 'wp-body' }, content));
+    renderStatus();
     dock(true);
   }
+
+  /* ---------- 右栏顶部状态行（分析状态 + 提示，替代盖住聊天的弹窗） ---------- */
+  const statusEl = h('div', { class: 'wp-status' });
+  let statusText = '', statusKind = '';
+  let notice = null, noticeTimer = null;
+  function setStatus(text, kind) { statusText = text || ''; statusKind = kind || ''; renderStatus(); }
+  function renderStatus() {
+    statusEl.innerHTML = '';
+    if (statusText) statusEl.appendChild(h('div', { class: 'ws-line ' + statusKind }, statusText));
+    if (notice) {
+      statusEl.appendChild(h('div', { class: 'ws-line ' + (notice.err ? 'err' : 'ok') }, notice.msg,
+        notice.err ? h('button', { class: 'ws-close', title: '知道了', onclick: () => { notice = null; renderStatus(); } }, '×') : null));
+    }
+    statusEl.style.display = statusEl.firstChild ? '' : 'none';
+  }
+  // 三栏打开时，提示显示在右栏顶部；成功类提示 4 秒后消失，错误要手动关掉
+  function panelNotice(msg, isErr) {
+    if (!document.documentElement.classList.contains('wat-docked') || panel.style.display === 'none') return false;
+    notice = { msg, err: !!isErr };
+    clearTimeout(noticeTimer);
+    if (!isErr) noticeTimer = setTimeout(() => { notice = null; renderStatus(); }, 4000);
+    renderStatus();
+    return true;
+  }
+
+  /* ---------- 对话指纹：判断分析之后对话有没有新内容 ---------- */
+  function convFingerprint() {
+    const conv = readConversation(6);
+    return conv.map((m) => m.from + '|' + m.time + '|' + m.text.slice(0, 80)).join('\n');
+  }
+  function chatScroller() {
+    const any = document.querySelector('#main [data-testid^="conv-msg-"], #main .message-in, #main .message-out');
+    let el = any && any.parentElement;
+    while (el && el !== document.body) {
+      const st = getComputedStyle(el);
+      if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 10) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  // 只有聊天停在最底部时才认为看到的是最新消息（往上翻历史时不触发）
+  function atBottom() {
+    const sc = chatScroller();
+    return !sc || sc.scrollHeight - sc.scrollTop - sc.clientHeight < 300;
+  }
+  const fmtTime = (ts) => new Date(ts).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
   async function fillInput(text) {
     const el = getInput();
@@ -980,8 +1034,11 @@
   function backToResult() {
     panelView = 'result';
     const saved = ai.analyses()[getChatName()];
-    if (saved) showPanel(renderResult(normalizeResult(saved.result), saved.at));
-    else showNotAnalyzed();
+    if (saved) {
+      showPanel(renderResult(normalizeResult(saved.result), saved.at));
+      if (ai.apiKey && saved.fp !== convFingerprint() && atBottom()) analyzeCurrent(true, true);
+      else setStatus('已是最新分析（' + fmtTime(saved.at) + '）', 'ok');
+    } else { setStatus(''); showNotAnalyzed(); }
   }
 
   function showNotAnalyzed() {
@@ -1001,40 +1058,94 @@
   }
 
   let analyzing = false;
-  async function analyzeCurrent(force) {
+  let pendingLabel = null; // 级别变了但用户正在输入，等输入框清空再更新列表
+  // force：强制重新分析；auto：对话有新消息时自动触发
+  async function analyzeCurrent(force, auto) {
     const name = getChatName();
     if (!document.querySelector('#main') || !name) { toast('请先打开一个聊天', true); return; }
     panelChat = name;
     panelView = 'result';
     if (!ai.apiKey) {
-      showPanel(h('div', null, h('p', null, '还没有填写 DeepSeek API Key。'), h('button', { onclick: openSettings }, '打开设置')));
+      showPanel(h('div', null, h('p', null, '还没有填写 DeepSeek API Key。'), h('button', { onclick: () => openSettings() }, '打开设置')));
       return;
     }
     const saved = ai.analyses()[name];
-    if (saved && !force) { showPanel(renderResult(normalizeResult(saved.result), saved.at)); return; }
+    const fp = convFingerprint();
+    if (saved && !force && saved.fp === fp) {
+      showPanel(renderResult(normalizeResult(saved.result), saved.at));
+      setStatus('对话没有新内容，这已是最新分析（' + fmtTime(saved.at) + '）', 'ok');
+      return;
+    }
     if (analyzing) return;
     const conv = readConversation(60);
     if (!conv.length) { toast('这个聊天里没有可分析的文字消息', true); return; }
     analyzing = true;
-    showPanel(h('div', { class: 'wp-muted', style: 'padding:20px 0;text-align:center' }, '正在分析 ' + conv.length + ' 条消息…'));
+    if (saved) {
+      // 已有旧结果：先留着旧内容，顶部提示正在更新，不清空页面
+      if (!panel.querySelector('.wp-tags')) showPanel(renderResult(normalizeResult(saved.result), saved.at));
+      setStatus(auto ? '对话有新消息，正在重新分析…' : '正在重新分析…', 'busy');
+    } else {
+      showPanel(h('div', { class: 'wp-muted', style: 'padding:20px 0;text-align:center' }, '正在分析 ' + conv.length + ' 条消息…'));
+      setStatus('正在分析…', 'busy');
+    }
+    const prevLevel = saved && saved.level;
     try {
       const { system, user } = buildPrompt(conv, name);
       const r = normalizeResult((await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: user }])).json);
-      ai.saveAnalysis(name, r);
-      if (getChatName() === name && panelView === 'result') showPanel(renderResult(r, Date.now()));
-      if (ai.autoLabel && getChatName() === name) {
-        const res = await applyLevelList(r.level, name);
-        toast(res.ok ? '已加入列表「' + r.level + ' ' + LEVEL_NAME[r.level] + '」' : res.msg, !res.ok);
+      ai.saveAnalysis(name, r, fp);
+      const last = conv[conv.length - 1];
+      if (getChatName() === name && panelView === 'result') {
+        showPanel(renderResult(r, Date.now()));
+        setStatus('已是最新分析（' + fmtTime(Date.now()) + (last ? '，最新：' + last.from + (last.time ? ' ' + last.time.split(',')[0] : '') : '') + '）' +
+          (prevLevel && prevLevel !== r.level ? '　级别 ' + prevLevel + ' → ' + r.level : ''), 'ok');
+      } else if (getChatName() === name) {
+        setStatus('分析已更新，返回分析页查看', 'ok');
+      }
+      // 列表标签：级别没变就不动；用户正在输入时延后，避免打断打字
+      if (ai.autoLabel && getChatName() === name && (!auto || prevLevel !== r.level)) {
+        const el = getInput();
+        if (el && getInputText(el)) pendingLabel = { name, level: r.level };
+        else {
+          const res = await applyLevelList(r.level, name);
+          if (!res.ok) toast(res.msg, true);
+          else if (prevLevel !== r.level) toast('已加入列表「' + r.level + ' ' + LEVEL_NAME[r.level] + '」');
+        }
       }
     } catch (e) {
-      if (getChatName() === name) showPanel(h('div', null, h('p', { style: 'color:#c62828' }, '分析失败：' + e.message), h('button', { onclick: () => analyzeCurrent(true) }, '重试')));
-      else toast('分析失败：' + e.message, true);
+      if (getChatName() === name && !saved) showPanel(h('div', null, h('p', { style: 'color:#c62828' }, '分析失败：' + e.message), h('button', { onclick: () => analyzeCurrent(true) }, '重试')));
+      setStatus('');
+      toast('分析失败：' + e.message, true);
     } finally {
       analyzing = false;
     }
   }
 
-  // 切换聊天时：第三栏跟着切换到该客户的分析结果
+  // 自动更新：当前聊天有新消息（客户或我方），内容稳定 4 秒后重新分析
+  let watchFp = '', watchSince = 0;
+  setInterval(async () => {
+    if (!document.documentElement.classList.contains('wat-docked') || !ai.apiKey) return;
+    const name = getChatName();
+    if (!name || name !== panelChat) return;
+    // 延后的列表标签：输入框清空后再更新
+    if (pendingLabel && pendingLabel.name === name && !analyzing) {
+      const el = getInput();
+      if (el && !getInputText(el)) {
+        const pl = pendingLabel; pendingLabel = null;
+        const res = await applyLevelList(pl.level, name);
+        if (res.ok) toast('已加入列表「' + pl.level + ' ' + LEVEL_NAME[pl.level] + '」'); else toast(res.msg, true);
+      }
+    }
+    const saved = ai.analyses()[name];
+    if (!saved || analyzing || !atBottom()) return; // 没分析过的客户不自动分析，省费用
+    const fp = convFingerprint();
+    if (!fp || fp === saved.fp) { watchFp = ''; return; }
+    if (fp !== watchFp) { watchFp = fp; watchSince = Date.now(); return; }
+    if (Date.now() - watchSince < 4000) return; // 等对方连发结束
+    watchFp = '';
+    if (panelView === 'result') analyzeCurrent(true, true);
+    else setStatus('客户有新消息，返回分析页时会自动更新', 'warn');
+  }, 1500);
+
   function syncPanel() {
     const name = getChatName();
     if (!document.documentElement.classList.contains('wat-docked')) return;
@@ -1049,9 +1160,12 @@
     if (name === panelChat) return;
     panelChat = name;
     panelView = 'result';
+    notice = null;
     const saved = ai.analyses()[name];
-    if (saved) showPanel(renderResult(normalizeResult(saved.result), saved.at));
-    else showNotAnalyzed();
+    if (saved) {
+      showPanel(renderResult(normalizeResult(saved.result), saved.at));
+      setStatus(saved.fp === convFingerprint() ? '已是最新分析（' + fmtTime(saved.at) + '）' : '上次分析：' + fmtTime(saved.at) + '，对话有更新，稍后自动重新分析', saved.fp === convFingerprint() ? 'ok' : 'warn');
+    } else { setStatus(''); showNotAnalyzed(); }
   }
   setInterval(syncPanel, 700);
   if (store.get('docked', false)) { document.documentElement.classList.add('wat-docked'); panel.style.display = 'flex'; syncPanel(); }
