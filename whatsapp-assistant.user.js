@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.2
+// @version      1.7.3
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -53,7 +53,7 @@
     set defaultLang(v) { store.set('defaultLang', v); },
     get autoSend() { return store.get('autoSend', true); },
     set autoSend(v) { store.set('autoSend', v); },
-    get engine() { return store.get('engine', 'google'); },
+    get engine() { return store.get('engine', 'ai'); }, // ai：发送用 DeepSeek 翻译；接收翻译始终用谷歌/微软
     set engine(v) { store.set('engine', v); },
     get enabled() { return store.get('enabled', true); },
     set enabled(v) { store.set('enabled', v); },
@@ -111,6 +111,69 @@
       try { return await fn(text, to); } catch (e) { lastErr = e; if (fn === microsoftTranslate) msToken = null; }
     }
     throw lastErr || new Error('翻译失败');
+  }
+
+  /* ---------------- 发送翻译：AI（DeepSeek）结合上下文翻译 + 术语表 ---------------- */
+  // 术语表：每行「中文 = 英文译法 | 西语译法」，西语部分可省略
+  function glossary() {
+    return String(store.get('glossary', '') || '').split('\n').map((l) => {
+      const m = l.match(/^\s*([^=＝#]+?)\s*[=＝]\s*(.+?)\s*$/);
+      if (!m) return null;
+      const [en, es] = m[2].split(/\s*[|｜]\s*/);
+      return { zh: m[1], en: en || '', es: es || '' };
+    }).filter((g) => g && (g.en || g.es));
+  }
+  // 机器翻译前，先把术语换成目标语言的说法（只支持英语、西语）
+  function applyGlossary(text, lang) {
+    const key = lang === 'es' ? 'es' : lang === 'en' ? 'en' : '';
+    if (!key) return text;
+    let out = text;
+    glossary().filter((g) => g[key]).sort((a, b) => b.zh.length - a.zh.length)
+      .forEach((g) => { out = out.split(g.zh).join(' ' + g[key] + ' '); });
+    return out.replace(/ {2,}/g, ' ').trim();
+  }
+  const langName = (code) => ((LANGS.find(([c]) => c === code) || [])[1] || code);
+
+  async function aiTranslateOut(text, lang) {
+    const gl = glossary();
+    const conv = readConversation(8);
+    const system = [
+      '你是专业的外贸汽车销售翻译。把销售写的中文消息翻译成「' + langName(lang) + '」，在 WhatsApp 上直接发给客户。客户在中美洲和加勒比地区，聊的是汽车生意。',
+      '【要求】',
+      '1. 意思必须忠实：不增加、不删除信息；严格保留人称和谁对谁做什么（我/你/我们、给/要、问/答），问句仍然是问句。不要自己加价格、优惠、承诺或客套话。',
+      '2. 用母语者在 WhatsApp 上自然的说法，不要逐字直译，不要中式英语；可以调整语序和句式。英语用美式说法，西班牙语用拉美说法。',
+      '3. 汽车行业用当地常用词，例如：二手车 = used car（西语 carro usado / vehículo usado），落地价 = landed price，定金 = deposit，现车 = in stock。',
+      '4. 聊天记录只用来理解上下文（指代、车型、话题），不要翻译它，也不要替销售回答客户。',
+      '5. 保留原文的换行、数字、型号和表情。',
+      '6. 只输出译文本身，不要引号、不要解释、不要中文。',
+      gl.length ? '【术语表（必须按这里的译法）】\n' + gl.map((g) => '- ' + g.zh + '：' + [g.en && '英语 ' + g.en, g.es && '西语 ' + g.es].filter(Boolean).join('；')).join('\n') : '',
+    ].filter(Boolean).join('\n');
+    const user = (conv.length ? '【最近的聊天记录（只作参考）】\n' + conv.map((m) => m.from + '：' + m.text.slice(0, 300)).join('\n') + '\n\n' : '') +
+      '【要翻译的中文】\n' + text;
+    const res = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: user }], 600, { json: false, timeout: 15000 });
+    const out = res.text.trim().replace(/^(译文|翻译|Translation)\s*[:：]\s*/i, '').replace(/^["“'「]([\s\S]*)["”'」]$/, '$1').trim();
+    if (!out || res.truncated) throw new Error('AI 没有返回完整译文');
+    if (hasChinese(out)) throw new Error('AI 译文里还有中文');
+    return out;
+  }
+
+  // 发送用的翻译：选了 AI 且填了 Key 就用 AI，失败自动换谷歌/微软
+  let noKeyTipShown = false;
+  async function translateOut(text, lang) {
+    if (settings.engine === 'ai') {
+      if (store.get('dsKey', '')) {
+        try { return { text: await aiTranslateOut(text, lang), via: 'AI' }; } catch (e) {
+          const r = await translate(applyGlossary(text, lang), lang);
+          return { text: r.text, via: '机器', note: 'AI 翻译失败（' + e.message + '），已改用谷歌/微软翻译' };
+        }
+      }
+      const r = await translate(applyGlossary(text, lang), lang);
+      const note = noKeyTipShown ? '' : '没有填 DeepSeek Key，已用谷歌翻译（在 ⚙ 设置里填 Key 后可用 AI 翻译）';
+      noKeyTipShown = true;
+      return { text: r.text, via: '机器', note };
+    }
+    const r = await translate(applyGlossary(text, lang), lang);
+    return { text: r.text, via: '机器' };
   }
 
   /* ---------------- WhatsApp 页面元素 ---------------- */
@@ -205,15 +268,16 @@
     busy = true;
     ui.setBusy(true);
     try {
-      const res = await translate(original, lang);
+      const res = await translateOut(original, lang);
       if (getInputText(el) !== original) { toast('输入内容已改变，已取消本次翻译', true); return; }
       if (!(await replaceInputText(el, res.text))) { toast('无法写入输入框，请刷新页面后重试', true); return; }
       lastTranslated = getInputText(el);
       if (andSend) {
         await sleep(120);
         if (!clickSend()) toast('未找到发送按钮，请手动按回车', true);
+        else if (res.note) toast(res.note);
       } else {
-        toast('已翻译为 ' + lang.toUpperCase() + '，检查后按回车发送');
+        toast((res.note ? res.note + '。' : '') + '已翻译为 ' + lang.toUpperCase() + '（' + res.via + '），检查后按回车发送');
       }
     } catch (e) {
       toast('翻译失败：' + e.message + '（原文未发送）', true);
@@ -526,7 +590,7 @@
     <select id="wat-lang" title="本聊天发送语言（每个聊天单独记忆）">${LANGS.map(([c, n]) => `<option value="${c}">${n}</option>`).join('')}</select>
     <label title="开启后：输入含中文时按回车，自动翻译并发送"><input type="checkbox" id="wat-auto">回车自动翻译发送</label>
     <label title="对方发来的外语消息，在原文下方自动显示中文译文"><input type="checkbox" id="wat-in">对方消息译中文</label>
-    <select id="wat-engine" title="翻译引擎（失败会自动换另一个）"><option value="google">谷歌</option><option value="microsoft">微软</option></select>
+    <select id="wat-engine" title="发送翻译引擎。AI：结合聊天上下文、说法更地道（需要 DeepSeek Key，失败自动换谷歌）。对方消息的中文译文始终用谷歌/微软"><option value="ai">AI 翻译</option><option value="google">谷歌</option><option value="microsoft">微软</option></select>
     <button id="wat-analyze" title="AI 分析当前客户的级别并给出回复建议" style="background:#027eb5">分析客户</button>
     <button id="wat-set" title="设置（API Key、价格表、话术库）" style="background:#8696a0">⚙</button>
     <button id="wat-go" title="只翻译不发送（快捷键 Ctrl+Enter）">翻译</button>
@@ -736,7 +800,7 @@
   }
 
   // opts.json=false：普通文字回答（AI 助手用）；默认要求 JSON
-  function deepSeekOnce(messages, maxTokens, json) {
+  function deepSeekOnce(messages, maxTokens, json, timeout) {
     return new Promise((resolve, reject) => {
       const body = { model: 'deepseek-chat', messages, temperature: json ? 0.4 : 0.3, max_tokens: maxTokens || 1500 };
       if (json) body.response_format = { type: 'json_object' };
@@ -745,7 +809,7 @@
         url: 'https://api.deepseek.com/chat/completions',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ai.apiKey },
         data: JSON.stringify(body),
-        timeout: 120000,
+        timeout: timeout || 120000,
         onload: (r) => {
           if (r.status === 401) return reject(new Error('API Key 不正确，请在设置里检查'));
           if (r.status === 402) return reject(new Error('DeepSeek 账户余额不足，请充值'));
@@ -772,7 +836,7 @@
     const json = !(opts && opts.json === false);
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) { // 偶尔返回空内容或格式不对，自动重试一次
-      const { txt, finish } = await deepSeekOnce(messages, maxTokens, json);
+      const { txt, finish } = await deepSeekOnce(messages, maxTokens, json, opts && opts.timeout);
       if (!json) {
         if (txt.trim()) return { text: txt, raw: txt, truncated: finish === 'length' };
         lastErr = new Error('AI 没有返回内容，请重试');
@@ -1464,6 +1528,8 @@
     const priceIn = h('textarea', { rows: '5', placeholder: '例：R8 标准版 FOB 上海 USD xxxx；运到伯利兹城落地价 USD xxxx；付款：T/T 30% 定金，70% 发货前付清；交期：付款后 xx 天（留空则 AI 不提任何价格和条件）' }); priceIn.value = ai.prices;
     const rulesIn = h('textarea', { rows: '5' }); rulesIn.value = ai.rules;
     const labelIn = h('input', { type: 'checkbox' }); labelIn.checked = ai.autoLabel;
+    const glossIn = h('textarea', { rows: '4', placeholder: '每行一条：中文 = 英文 | 西语（西语可省略）\n二手车 = used car | carro usado\n落地价 = landed price | precio puesto en destino' });
+    glossIn.value = store.get('glossary', '');
     const piSec = piSettingsSection();
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
@@ -1482,6 +1548,7 @@
         h('label', null, '我方业务介绍'), bizIn,
         h('label', null, '价格表与交易条款（价格、付款方式、交期等，AI 只会引用这里写的）'), priceIn,
         h('label', null, '客户分级标准'), rulesIn,
+        h('label', null, '翻译术语表（发送翻译时固定用这些译法；AI 翻译和谷歌/微软都生效）'), glossIn,
         h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表')),
       pi: piSec,
       pb: h('div', null, h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox),
@@ -1508,6 +1575,7 @@
           ai.prices = priceIn.value;
           ai.rules = rulesIn.value.trim() || DEFAULT_RULES;
           ai.autoLabel = labelIn.checked;
+          store.set('glossary', glossIn.value.trim());
           piSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');
