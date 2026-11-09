@@ -5,7 +5,7 @@ await p.goto('file://'+__dirname+'/page5.html');
 await p.addScriptTag({path:'node_modules/html2canvas/dist/html2canvas.min.js'});
 await p.addScriptTag({path:'node_modules/jspdf/dist/jspdf.umd.min.js'});
 await p.addScriptTag({content:code});
-await p.evaluate(()=>GM_setValue('dsKey','sk-test'));await p.waitForTimeout(600);
+await p.evaluate(()=>{GM_setValue('aiIn',false);GM_setValue('dsKey','sk-test');});await p.waitForTimeout(600);
 const st=()=>p.evaluate(()=>document.querySelector('#wat-panel .wp-status')?.innerText.replace(/\n/g,' | '));
 const calls=()=>p.evaluate(()=>window.dsCalls||0);
 await p.click('#wat-analyze');await p.waitForTimeout(2500);

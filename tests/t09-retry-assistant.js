@@ -4,7 +4,7 @@ const code='(function(window){\n'+raw+'\n})(new Proxy(window,{get(t,k){const v=t
 (async()=>{const b=await chromium.launch();const p=await b.newPage({viewport:{width:1400,height:900}});p.on('pageerror',e=>console.log('PAGEERR',e.message));
 await p.goto('file://'+__dirname+'/page9.html');
 await p.addScriptTag({content:code});
-await p.evaluate(()=>{GM_setValue('dsKey','sk-test');window.badOnce=1;});await p.waitForTimeout(600);
+await p.evaluate(()=>{GM_setValue('aiIn',false);GM_setValue('dsKey','sk-test');window.badOnce=1;});await p.waitForTimeout(600);
 await p.click('#wat-analyze');await p.waitForTimeout(3000);
 console.log('1 analysis after empty-once retry:',await p.evaluate(()=>document.querySelector('#wat-panel .wp-reply')?.textContent),'calls',await p.evaluate(()=>dsCalls));
 await p.evaluate(()=>{window.wrapJson=1;});await p.click('#wat-panel button:has-text("重新分析")');await p.waitForTimeout(2500);

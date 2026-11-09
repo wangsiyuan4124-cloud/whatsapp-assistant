@@ -5,7 +5,7 @@ await p.goto('file://'+__dirname+'/page5.html');
 await p.addScriptTag({path:'node_modules/html2canvas/dist/html2canvas.min.js'});
 await p.addScriptTag({path:'node_modules/jspdf/dist/jspdf.umd.min.js'});
 await p.addScriptTag({content:code});
-await p.evaluate(()=>GM_setValue('dsKey','sk-test'));await p.waitForTimeout(600);
+await p.evaluate(()=>{GM_setValue('aiIn',false);GM_setValue('dsKey','sk-test');});await p.waitForTimeout(600);
 await p.click('#wat-analyze');await p.waitForTimeout(2500);
 await p.click('#wat-panel button:has-text("生成 PI")');await p.waitForTimeout(800);
 console.log('warn:',await p.evaluate(()=>document.querySelector('.pi-warn')?.innerText));

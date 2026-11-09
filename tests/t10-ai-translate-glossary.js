@@ -22,7 +22,7 @@ console.log('0 engine default:',await p.evaluate(()=>document.getElementById('wa
 await say('也就是说，你需要的车型可以是二手车，对吗？');
 console.log('1 no key sent:',await p.evaluate(()=>sent.at(-1)),'| ds calls',await p.evaluate(()=>dsReqs.length),'| toast:',await toast());
 // 2 有 Key + 术语表：AI 翻译，带上下文和术语表
-await p.evaluate(()=>{GM_setValue('dsKey','sk-test');GM_setValue('glossary','# 注释行\n二手车 = used car | carro usado\n落地价 = landed price\n乱写的一行');});
+await p.evaluate(()=>{GM_setValue('aiIn',false);GM_setValue('dsKey','sk-test');GM_setValue('glossary','# 注释行\n二手车 = used car | carro usado\n落地价 = landed price\n乱写的一行');});
 await say('也就是说，你需要的车型可以是二手车，对吗？');
 const r=await p.evaluate(()=>{const q=dsReqs.at(-1);return {sys:q.messages[0].content,user:q.messages[1].content,json:!!q.response_format,to:window.lastTimeout};});
 console.log('2 ai sent:',await p.evaluate(()=>sent.at(-1)),'| google reqs for it:',await p.evaluate(()=>reqs.filter(u=>u.includes('translate_a')&&decodeURIComponent(u).includes('二手车')).length));

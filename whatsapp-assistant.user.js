@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.3
+// @version      1.7.4
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -409,8 +409,92 @@
       host.insertAdjacentElement('afterend', box);
     }
     box.dataset.src = text;
+    box.dataset.kind = res.ai ? 'ai' : res.err ? 'err' : 'mt';
     box.textContent = res.err ? '（翻译失败，稍后自动重试）' : res.text;
     box.classList.toggle('wat-tr-err', !!res.err);
+    box.classList.toggle('wat-tr-ai', !!res.ai);
+  }
+
+  /* ---------- 对方消息的 AI 翻译：先显示机器翻译，AI 结果回来后替换 ---------- */
+  // 只翻每个聊天最近 AI_IN_RECENT 条客户消息；多条合成一次请求；结果存起来，不重复翻
+  const AI_IN_RECENT = 20, AI_IN_BATCH = 8, AI_IN_CACHE_MAX = 600;
+  const aiInOn = () => store.get('aiIn', true) && !!store.get('dsKey', '');
+  let aiTrStore = null;
+  const aiTr = {
+    all() { if (!aiTrStore) aiTrStore = store.get('aiTrCache', {}) || {}; return aiTrStore; },
+    get(t) { return aiTr.all()[t]; },
+    put(pairs) {
+      const all = aiTr.all();
+      pairs.forEach(([t, zh]) => { delete all[t]; all[t] = zh; });
+      const keys = Object.keys(all);
+      keys.slice(0, Math.max(0, keys.length - AI_IN_CACHE_MAX)).forEach((k) => delete all[k]);
+      store.set('aiTrCache', all);
+    },
+  };
+  const aiErr = new Map();   // 原文 -> 失败时间（2 分钟后再试）
+  const aiPending = new Set();
+  let aiQueue = [];          // { text, chat }
+  let aiTimer = null, aiRunning = false, aiBackoffUntil = 0;
+
+  function aiEnqueue(text, chat) {
+    if (aiPending.has(text) || aiTr.get(text) || text.length > 1500) return;
+    const e = aiErr.get(text);
+    if (e && Date.now() - e < 120000) return;
+    aiPending.add(text);
+    aiQueue.push({ text, chat });
+    if (!aiTimer) aiTimer = setTimeout(aiFlush, 600);
+  }
+
+  async function aiFlush() {
+    aiTimer = null;
+    if (aiRunning) return;
+    const chat = getChatName();
+    // 切换了聊天：别的聊天的排队消息先丢掉，回到那个聊天时会重新排队
+    aiQueue.filter((q) => q.chat !== chat).forEach((q) => aiPending.delete(q.text));
+    aiQueue = aiQueue.filter((q) => q.chat === chat);
+    if (!aiQueue.length || !aiInOn()) { aiQueue.forEach((q) => aiPending.delete(q.text)); aiQueue = []; return; }
+    if (Date.now() < aiBackoffUntil) { aiTimer = setTimeout(aiFlush, aiBackoffUntil - Date.now()); return; }
+    const batch = aiQueue.splice(0, AI_IN_BATCH);
+    aiRunning = true;
+    try {
+      const got = await aiTranslateIn(batch.map((q) => q.text), chat);
+      const ok = [];
+      batch.forEach((q, i) => { if (got[i]) ok.push([q.text, got[i]]); else aiErr.set(q.text, Date.now()); });
+      if (ok.length) aiTr.put(ok);
+    } catch (e) {
+      batch.forEach((q) => aiErr.set(q.text, Date.now()));
+      aiBackoffUntil = Date.now() + 60000; // 出错（余额不足、网络等）先停 1 分钟，避免反复请求
+    } finally {
+      batch.forEach((q) => aiPending.delete(q.text));
+      aiRunning = false;
+      scanIncoming();
+      if (aiQueue.length && !aiTimer) aiTimer = setTimeout(aiFlush, 300);
+    }
+  }
+
+  async function aiTranslateIn(texts, chatName) {
+    const gl = glossary();
+    const conv = readConversation(12);
+    const system = [
+      '你是外贸汽车销售的翻译助手。把客户发来的 WhatsApp 消息翻译成简体中文，给中国销售看。客户在中美洲和加勒比地区，聊的是汽车生意。',
+      '【要求】',
+      '1. 忠实原文，逐句翻译，严格保留人称和谁对谁做什么（I/you/we、给/要、问/答），问句仍然是问句。不要总结、不要加建议、不要替销售回答。',
+      '2. 结合聊天上下文理解指代、车型和数字。数字的单位能从上下文确定时，可以在括号里简短补充，例如「80（指 8 万公里）是上限」。',
+      '3. 客户的拼写错误和缩写按本意翻译（如 ti → to、milage → mileage、pls → please），不用指出。',
+      '4. 译文要像中国人说话一样自然，不要翻译腔。',
+      '5. 原文有歧义时，按最可能的意思翻译，再在括号里用一句话注明另一种理解。',
+      gl.length ? '【术语表（外语译成中文时用左边的中文说法）】\n' + gl.map((g) => '- ' + [g.en, g.es].filter(Boolean).join(' / ') + ' → ' + g.zh).join('\n') : '',
+      '6. 只输出 JSON：{"items":[{"id":1,"zh":"中文译文"}]}，id 和下面的编号一一对应，每条都要有。',
+    ].filter(Boolean).join('\n');
+    const user = (conv.length ? '【最近的聊天记录（只作参考，不要翻译）】\n' + convText(conv, chatName) + '\n\n' : '') +
+      '【需要翻译的客户消息】\n' + texts.map((t, i) => (i + 1) + '. ' + t).join('\n');
+    const { json } = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: user }], 1500, { timeout: 30000 });
+    const items = (json && Array.isArray(json.items)) ? json.items : [];
+    return texts.map((t, i) => {
+      const it = items.find((x) => Number(x && x.id) === i + 1);
+      const zh = it && String(it.zh || '').trim();
+      return zh && hasChinese(zh) ? zh : '';
+    });
   }
 
   function pump() {
@@ -432,6 +516,8 @@
     if (!on) return;
     const mainRect = main.getBoundingClientRect();
     let lastInText = '';
+    const useAi = aiInOn();
+    const toTranslate = [];
     main.querySelectorAll('[data-testid^="conv-msg-"], .message-in').forEach((row) => {
       if (!isIncoming(row, mainRect)) return;
       const span = getMsgTextSpan(row);
@@ -440,16 +526,25 @@
       if (!text || text.length > 3000) return;
       if (/\p{L}/u.test(text)) lastInText = text; // 纯表情不算
       if (!needsTranslate(text)) return;
+      toTranslate.push(text);
       const cached = trCache.get(text);
       if (cached && cached.err && Date.now() - cached.at > 30000) trCache.delete(text);
       const c = trCache.get(text);
-      if (c) {
+      const aiText = useAi && aiTr.get(text);
+      // 显示优先级：AI 译文 > 机器译文 > 失败提示
+      const show = aiText ? { text: aiText, ai: true } : c;
+      if (show) {
         const box = trBoxOf(span);
-        if (!box || box.dataset.src !== text) renderTr(span, text, c);
-        return;
+        const kind = show.ai ? 'ai' : show.err ? 'err' : 'mt';
+        if (!box || box.dataset.src !== text || box.dataset.kind !== kind) renderTr(span, text, show);
       }
-      if (!pending.has(text)) { pending.add(text); queue.push(text); }
+      // 机器翻译照常进行（用来识别客户语言，也是 AI 失败时的兜底）
+      if (!c && !pending.has(text)) { pending.add(text); queue.push(text); }
     });
+    if (useAi) {
+      const chat = getChatName();
+      [...new Set(toTranslate)].slice(-AI_IN_RECENT).forEach((t) => aiEnqueue(t, chat));
+    }
     // 按对方最新一条消息的语言，自动设定本聊天的回复语言（手动选过的不覆盖）
     const last = lastInText && trCache.get(lastInText);
     const base = last && last.from ? last.from.split('-')[0] : '';
@@ -491,6 +586,7 @@
   .wat-tr{direction:ltr;text-align:left;unicode-bidi:plaintext;margin-top:4px;padding-top:4px;border-top:1px dashed rgba(0,0,0,.18);color:#027eb5;font-size:.93em;line-height:1.45;white-space:pre-wrap;word-break:break-word}
   .wat-tr::before{content:"译：";color:#8696a0}
   .wat-tr.wat-tr-err{color:#c62828}
+  .wat-tr.wat-tr-ai::before{content:"译(AI)："}
   .wat-lv{display:inline-block;font:500 11px/1.5 system-ui,"Microsoft YaHei",sans-serif;padding:0 6px;border-radius:6px;margin-left:6px;vertical-align:middle}
   .wat-lv.big{font-size:13px;padding:2px 8px;margin-left:0}
   .wat-lv-A{background:#d9fdd3;color:#0b6b3a}.wat-lv-B{background:#dbeefc;color:#0b4f7c}.wat-lv-C{background:#fdf0cc;color:#7a5200}.wat-lv-D{background:#e9edef;color:#54656f}
@@ -1530,6 +1626,7 @@
     const labelIn = h('input', { type: 'checkbox' }); labelIn.checked = ai.autoLabel;
     const glossIn = h('textarea', { rows: '4', placeholder: '每行一条：中文 = 英文 | 西语（西语可省略）\n二手车 = used car | carro usado\n落地价 = landed price | precio puesto en destino' });
     glossIn.value = store.get('glossary', '');
+    const aiInIn = h('input', { type: 'checkbox' }); aiInIn.checked = store.get('aiIn', true);
     const piSec = piSettingsSection();
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
@@ -1549,6 +1646,7 @@
         h('label', null, '价格表与交易条款（价格、付款方式、交期等，AI 只会引用这里写的）'), priceIn,
         h('label', null, '客户分级标准'), rulesIn,
         h('label', null, '翻译术语表（发送翻译时固定用这些译法；AI 翻译和谷歌/微软都生效）'), glossIn,
+        h('label', { class: 'ws-inline' }, aiInIn, ' 对方消息用 AI 翻译成中文（每个聊天最近 20 条；先显示谷歌/微软译文，AI 结果回来后替换）'),
         h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表')),
       pi: piSec,
       pb: h('div', null, h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox),
@@ -1576,6 +1674,8 @@
           ai.rules = rulesIn.value.trim() || DEFAULT_RULES;
           ai.autoLabel = labelIn.checked;
           store.set('glossary', glossIn.value.trim());
+          store.set('aiIn', aiInIn.checked);
+          scanIncoming();
           piSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');

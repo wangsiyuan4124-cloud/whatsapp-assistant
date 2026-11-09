@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.7.3**，一个文件，约 2100 行，没有构建步骤。
+当前版本：**v1.7.4**，一个文件，约 2100 行，没有构建步骤。
 
 ## 2. 功能清单
 
@@ -14,7 +14,7 @@
 |---|---|
 | 发送翻译 | 输入中文按回车，自动翻译成本聊天的语言后发送；Ctrl+Enter 只翻译不发送。默认引擎「AI 翻译」：DeepSeek 结合最近 8 条聊天，翻成地道说法（美式英语 / 拉美西语），避免中式直译；没填 Key 或 AI 失败（15 秒超时、译文含中文等）自动换谷歌，再换微软 Edge，并在状态行提示。工具栏也可以改成只用谷歌或微软。中文输入法选词时的回车不拦截。 |
 | 术语表 | 设置 → 基本设置。每行「中文 = 英文 \| 西语」（西语可省，`#` 开头是注释）。AI 翻译时作为必须遵守的译法；谷歌 / 微软翻译前先把原文里的术语替换成目标语言（只支持英语、西语）。 |
-| 接收翻译 | 对方发来的外语消息，在原文下方显示「译：中文」。选中任意文字可点「译成中文」。 |
+| 接收翻译 | 对方发来的外语消息，在原文下方显示「译：中文」。先用谷歌 / 微软显示，填了 Key 且开着「对方消息用 AI 翻译」（设置 → 基本设置，默认开）时，每个聊天最近 20 条再交给 DeepSeek，结合上下文翻译（会理解 80 = 8 万公里、纠正 ti → to 这类笔误），回来后替换成「译(AI)：」。多条合成一次请求（每批最多 8 条），结果存在 `aiTrCache`（最多 600 条），不重复翻。AI 出错保留机器译文，并暂停 1 分钟。选中任意文字可点「译成中文」（仍用机器翻译）。 |
 | 每个聊天单独记语言 | 手动选的优先；否则按对方最新消息自动识别。 |
 | 三栏布局 | 打开右栏时，把 WhatsApp 的 `#app` 宽度缩小，右边空出一栏（400px，可加宽到 650px）。状态会被记住。 |
 | 工具栏 | 三栏时放在右栏顶部；关闭右栏时浮动，可拖动（拖 🌐）、可收起（–）。 |
@@ -29,7 +29,7 @@
 
 - 配置、存储、翻译接口（谷歌 / 微软）；发送翻译 `translateOut`（AI 翻译 `aiTranslateOut`，术语表 `glossary` / `applyGlossary`，失败退回机器翻译）
 - WhatsApp 页面元素：`getInput`、`getChatName`、`replaceInputText`、`clickSend`
-- 发送翻译核心流程、选中翻译、接收翻译（`scanIncoming`，MutationObserver + 定时兜底）
+- 发送翻译核心流程、选中翻译、接收翻译（`scanIncoming`，MutationObserver + 定时兜底；AI 部分是 `aiEnqueue` / `aiFlush` / `aiTranslateIn`，译文框用 `data-kind` = mt / ai / err 区分）
 - 悬浮工具栏 `ui`（`ui.position` 每 500ms 执行一次：三栏时贴在右栏的 `#wat-barslot` 位置）
 - **客户分析模块**：`baseContext`、`buildPrompt`、`callDeepSeek`（带重试和宽松 JSON 解析）、`applyLevelList`、`showPanel`、状态行 `setStatus` / `panelNotice`、`convFingerprint`、`renderResult`、`openRefine`、`anotherSuggestion`、AI 助手 `openAsk` / `renderHistory`、`analyzeCurrent`、`syncPanel`、设置面板 `openSettings(tab)`
 - **PI 模块**：`renderPiPage`（全部内联样式，794px 宽）、`makePiFiles`（html2canvas 生成图片，再用 jsPDF 生成 PDF）、`attachToChat`、`extractPiFromChat`、`renderPiEditor`、`piSettingsSection`
@@ -39,7 +39,7 @@
 
 ### 存储（GM_setValue，只存在用户这台电脑的 Chrome 里）
 
-`dsKey`（API Key）、`glossary`（术语表）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译，接收翻译始终用谷歌 / 微软）、`enabled`。
+`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`。
 
 **仓库是公开的**：代码里绝不能放 API Key、银行信息、公章或 Logo 图片。
 
@@ -88,7 +88,7 @@
 
 - `app.js` 用 Lexical 搭了一个模拟输入框（`npm run build` 打包成 `app.bundle.js`）。`page*.html` 是逐步加了功能的模拟 WhatsApp 页面：消息行、列表菜单、`GM_*` 函数、模拟的翻译和 DeepSeek 返回。
 - `page6.html` 起，模拟页面会把「按 Esc 关聊天」计数（`chatClosed`）。`#keep` 参数模拟「点菜单项后菜单不关」的情况。
-- `t01`–`t10` 是 Playwright 脚本（`t10` 测 AI 发送翻译、术语表和失败退回），输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
+- `t01`–`t11` 是 Playwright 脚本（`t10` 测 AI 发送翻译、术语表和失败退回；`t11` 测对方消息 AI 翻译）。`t03`–`t10` 设置了 Key，所以先设 `aiIn=false`，免得对方消息的 AI 翻译打乱它们对 DeepSeek 调用次数的统计，输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
 - 环境变量 `SCRIPT` 可以指定要测的脚本文件。
 - 模拟页面测不出 WhatsApp 改版的影响，重要改动发布后要请用户在真实页面上确认一次。
 

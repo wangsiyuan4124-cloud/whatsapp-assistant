@@ -6,7 +6,7 @@ await p.goto('file://'+__dirname+'/page5.html');
 await p.addScriptTag({path:'node_modules/html2canvas/dist/html2canvas.min.js'});
 await p.addScriptTag({path:'node_modules/jspdf/dist/jspdf.umd.min.js'});
 await p.addScriptTag({content:code});
-await p.evaluate((seal)=>{GM_setValue('dsKey','sk-test');GM_setValue('piSeller',{phone:'+86 138 0000 0000',email:'sales@cheryamc.com',contact:'Kevin Wang',bankName:'TEST BANK (HONG KONG) LIMITED',bankSwift:'TESTHKHH',bankAccount:'000-000000-000',bankAddress:'Test Road, Hong Kong',payment:'30% T/T 定金，70% 发货前付清',delivery:'收到定金后 30 天内发货',seal});},seal);
+await p.evaluate((seal)=>{GM_setValue('aiIn',false);GM_setValue('dsKey','sk-test');GM_setValue('piSeller',{phone:'+86 138 0000 0000',email:'sales@cheryamc.com',contact:'Kevin Wang',bankName:'TEST BANK (HONG KONG) LIMITED',bankSwift:'TESTHKHH',bankAccount:'000-000000-000',bankAddress:'Test Road, Hong Kong',payment:'30% T/T 定金，70% 发货前付清',delivery:'收到定金后 30 天内发货',seal});},seal);
 await p.waitForTimeout(600);
 await p.click('#wat-analyze');await p.waitForTimeout(2500);
 await p.click('#wat-panel button:has-text("生成 PI")');await p.waitForTimeout(800);

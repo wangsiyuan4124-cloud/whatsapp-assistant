@@ -3,7 +3,7 @@ const code=fs.readFileSync((process.env.SCRIPT||require('path').join(__dirname,'
 (async()=>{const b=await chromium.launch();const ctx=await b.newContext({viewport:{width:1400,height:850}});const p=await ctx.newPage();p.on('pageerror',e=>console.log('PAGEERR',e.message));
 await p.goto('file://'+__dirname+'/page4.html');
 await p.addScriptTag({content:code});
-await p.evaluate(()=>GM_setValue('dsKey','sk-test'));await p.waitForTimeout(700);
+await p.evaluate(()=>{GM_setValue('aiIn',false);GM_setValue('dsKey','sk-test');});await p.waitForTimeout(700);
 const fr=await p.evaluate(()=>{const r=document.getElementById('wat-bar').getBoundingClientRect();return [Math.round(r.left),Math.round(r.top)]});
 console.log('floating bar at',fr);
 // drag
