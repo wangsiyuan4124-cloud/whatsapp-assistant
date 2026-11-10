@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.7
+// @version      1.7.8
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -2543,15 +2543,19 @@
       });
       return g.title.en + '（' + (g.zh || g.id) + '）\n' + lines.join('\n') + ((g.pending || []).length ? '\n待确认（不要给数字，说会尽快确认）：' + g.pending.join('；') : '');
     });
-    return '【车型资料（参数以此为准；有报价的版本可以直接报 CIF 价，没有的不要编）】\n' + out.join('\n\n');
+    const anyCif = cat.groups.some(groupHasCif);
+    return '【车型资料（参数以此为准；有报价的版本可以直接报 CIF 价，没有的不要编）】\n' + out.join('\n\n') +
+      (anyCif ? '\n\n报 CIF 价时要说明：CIF ' + p.port + ' 只包含到港的海运费和保险费，不包含进口关税、当地税费、港口费用和内陆运输。客户问落地价时，说明这些费用需要另算，不要自己估数字。' : '');
   }
 
   /* ---------- 规格书页面（客户看到的 PDF；全部内联样式） ---------- */
   const SPEC_T = {
     en: { title: 'SPECIFICATIONS', hl: 'Highlights', key: 'Key specifications', feat: 'Features', price: (port) => 'Price CIF ' + port + ' (USD)',
-      legend: '● Standard   ○ Optional   — Not available', date: 'Date', valid: 'Prices valid until' },
+      legend: '● Standard   ○ Optional   — Not available', date: 'Date', valid: 'Prices valid until',
+      cifNote: (port) => 'CIF ' + port + ': includes ocean freight and insurance to the port. Import duties, local taxes, port charges and inland delivery are not included.' },
     es: { title: 'FICHA TÉCNICA', hl: 'Puntos destacados', key: 'Especificaciones principales', feat: 'Equipamiento', price: (port) => 'Precio CIF ' + port + ' (USD)',
-      legend: '● De serie   ○ Opcional   — No disponible', date: 'Fecha', valid: 'Precios válidos hasta' },
+      legend: '● De serie   ○ Opcional   — No disponible', date: 'Fecha', valid: 'Precios válidos hasta',
+      cifNote: (port) => 'CIF ' + port + ': incluye flete marítimo y seguro hasta el puerto. No incluye aranceles de importación, impuestos locales, gastos portuarios ni transporte terrestre.' },
   };
   function renderSpecPage(cat, g, lang, withPrice, heroUrl, cfg) {
     const T = SPEC_T[lang] || SPEC_T.en;
@@ -2597,6 +2601,8 @@
     (cat.featRows || []).forEach((f) => { const vals = vs.map((v) => mark[v.feat && v.feat[f.id]] || ''); if (vals.some(Boolean)) table.appendChild(row(L(f), vals)); });
     page.appendChild(table);
     page.appendChild(h('div', { style: 'margin-top:8px;color:' + GRAY + ';font-size:10px' }, T.legend));
+    // 带价格时，在表格下方醒目说明 CIF 包含 / 不包含哪些费用，避免客户误以为是落地价
+    if (withPrice) page.appendChild(h('div', { style: 'margin-top:6px;padding:6px 8px;background:#f0f4f8;border-left:3px solid ' + NAVY + ';color:#1f2933;font-size:10.5px' }, T.cifNote(p.port)));
     const notes = [L(cat.notes)];
     if (withPrice) notes.push(T.valid + ' ' + fmtDate(new Date(Date.now() + (num(cfg.validDays) || 15) * 86400000), lang) + '.');
     page.appendChild(h('div', { style: 'margin-top:6px;color:#7b8794;font-size:9.5px' }, notes.filter(Boolean).join(' ')));
@@ -2665,7 +2671,10 @@
       const hl = (g.highlights && (g.highlights[lang] || g.highlights.en)) || [];
       const cifs = g.versions.map(cifOf).filter((x) => x != null);
       const p = catStore.price();
-      const priceLine = priceIn.checked && cifs.length ? (lang === 'es' ? '\nPrecio CIF ' + p.port + ': desde USD ' : '\nPrice CIF ' + p.port + ': from USD ') + money(Math.min(...cifs)) : '';
+      const low = cifs.length ? money(Math.min(...cifs)) : '';
+      const priceLine = priceIn.checked && cifs.length ? (lang === 'es'
+        ? '\nPrecio CIF ' + p.port + ': desde USD ' + low + ' (hasta el puerto; no incluye aranceles ni gastos locales)'
+        : '\nPrice CIF ' + p.port + ': from USD ' + low + ' (to the port; import duties and local fees not included)') : '';
       setIntro((lang === 'es' ? 'Te presento la ' : 'Here is the ') + ((g.title && (g.title[lang] || g.title.en)) || '') + ':\n' +
         hl.map((x) => '• ' + x).join('\n') + priceLine + '\n' +
         (lang === 'es' ? 'Te envío fotos y la ficha técnica completa. ¿Qué versión te interesa?' : "I'm sending you photos and the full spec sheet. Which version are you interested in?"), '', false);

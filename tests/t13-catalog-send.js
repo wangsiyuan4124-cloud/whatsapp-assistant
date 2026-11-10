@@ -29,7 +29,7 @@ console.log('2 saved:',JSON.stringify(await p.evaluate(()=>GM_getValue('catPrice
 await p.click('#wat-analyze');await p.waitForTimeout(1500);
 let sys=await p.evaluate(()=>dsLog.filter(q=>q.messages[0].content.includes('分析客户并给出')).at(-1).messages[0].content);
 const blk=sys.split('【车型资料')[1].split('【硬规则】')[0];
-console.log('3 context: CIF',blk.includes('6MT Comfort') && blk.includes('报价 CIF Belize City USD 3,900.00'),'| ev override',blk.includes('USD 9,999.00'),'| pending',blk.includes('续航待确认'),'| no FOB',!/fob|1,000\.00/i.test(blk),'| rule',sys.includes('标了「待确认」的不要给数字'));
+console.log('3 context: CIF',blk.includes('6MT Comfort') && blk.includes('报价 CIF Belize City USD 3,900.00'),'| ev override',blk.includes('USD 9,999.00'),'| pending',blk.includes('续航待确认'),'| no FOB',!/fob|1,000\.00/i.test(blk),'| rule',sys.includes('标了「待确认」的不要给数字'),'| cif excludes',blk.includes('不包含进口关税'));
 // 4 打开「发车型资料」
 await p.click('#wat-panel button:has-text("发车型资料")');await p.waitForTimeout(800);
 const head=()=>p.evaluate(()=>document.querySelector('#wat-panel .wp-head').innerText.replace(/\n/g,' | '));
@@ -59,6 +59,7 @@ await p.click('#wat-panel img[title="02_side.jpg"]');
 await p.click('#wat-panel button:has-text("预览规格书")');await p.waitForTimeout(500);
 console.log('6 logo in header:',await p.evaluate(()=>document.querySelectorAll('#wat-pi-modal img[src^="data:image"]').length===2));
 console.log('6 preview:',await p.evaluate(()=>{const m=document.getElementById('wat-pi-modal');const t=m.innerText;return [m.style.display,/SPECIFICATIONS|FICHA TÉCNICA/.test(t),t.includes('TEST Diesel')||t.includes('TEST Diésel'),t.includes('3,900.00')&&t.includes('4,900.00'),(t.match(/●/g)||[]).length,!!m.querySelector('img[src^="data:image"]')].join(' ');}));
+console.log('6 cif note:',await p.evaluate(()=>(document.getElementById('wat-pi-modal').innerText.match(/CIF Belize City: [^\n]*/)||[''])[0]));
 await p.click('#wat-pi-modal button:has-text("关闭")');
 // 7 选视频后放进聊天：照片 + 规格书 JPG/PDF + 视频
 await p.click('#wat-panel label:has-text("🎬") input');
