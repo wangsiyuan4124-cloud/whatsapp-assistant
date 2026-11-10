@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.5
+// @version      1.7.6
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -1023,8 +1023,9 @@
       '【价格表与交易条款】\n' + (prices || '（暂无。）'),
       sc,
       pbSorted.length ? '【话术库（参考推进思路，可改写）】\n' + pbSorted.map((p) => '- [' + p.scene + '] ' + p.text).join('\n') : '',
+      catalogContext(),
       '【硬规则】',
-      '- 价格、优惠、付款方式、定金比例、交期、船期、库存、质保等具体条件，只能来自上面的【我方业务】和【价格表与交易条款】，或者聊天记录里我方已经说过的内容。没有依据的一律不要写，改为向客户提问或说明会尽快确认。',
+      '- 价格、优惠、付款方式、定金比例、交期、船期、库存、质保等具体条件，只能来自上面的【我方业务】【价格表与交易条款】【车型资料】，或者聊天记录里我方已经说过的内容。没有依据的一律不要写，改为向客户提问或说明会尽快确认。车型参数只能来自【车型资料】，标了「待确认」的不要给数字。',
       '- 回复用客户使用的语言，像 WhatsApp 聊天一样简短自然。',
       '- 回复要像这位销售本人写的：长度、语气、用词贴近他的真实回复。不要用 "I understand!"、"Great question!"、"Thanks for reaching out" 这类客服腔开头，除非他自己常这样写。',
     ].filter(Boolean).join('\n\n');
@@ -1214,7 +1215,7 @@
 
   function showPanel(content, title) {
     panel.innerHTML = '';
-    const sub = panelView === 'refine' || panelView === 'pi';
+    const sub = panelView === 'refine' || panelView === 'pi' || panelView === 'cat';
     panel.appendChild(h('div', { class: 'wp-head' },
       sub ? h('button', { class: 'wp-back', title: '返回客户分析', onclick: backToResult }, '← 返回') : null,
       h('b', null, title || '客户分析'),
@@ -1337,6 +1338,7 @@
       box.appendChild(h('div', null, '⏰ ' + [nf.when, nf.action].filter(Boolean).join(' · ')));
     }
     box.appendChild(h('div', { class: 'wp-foot' },
+      h('button', { onclick: () => openCatalog() }, '🚗 发车型资料'),
       h('button', { onclick: () => openPI(false) }, '📄 生成 PI'),
       h('button', { class: 'sec', onclick: () => openRefine({ reply: '', reply_zh: '', scene: '自定义' }, r) }, '✎ 让 AI 写一条'),
       h('button', { class: 'sec', onclick: saveMyLastMessage }, '☆ 收藏我发的最后一条'),
@@ -1447,6 +1449,7 @@
     showPanel(h('div', { style: 'padding:24px 0;text-align:center' },
       h('div', { class: 'wp-muted', style: 'margin-bottom:10px' }, '这个客户还没有分析'),
       h('button', { onclick: () => analyzeCurrent(true) }, '分析客户'), ' ',
+      h('button', { class: 'sec', onclick: () => openCatalog() }, '🚗 发车型资料'), ' ',
       h('button', { class: 'sec', onclick: () => openPI(false) }, '📄 生成 PI')));
   }
 
@@ -1794,6 +1797,7 @@
     const aiInIn = h('input', { type: 'checkbox' }); aiInIn.checked = store.get('aiIn', true);
     const piSec = piSettingsSection();
     const learnSec = learnSettingsSection();
+    const catSec = catalogSettingsSection();
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
       pbBox.innerHTML = '';
@@ -1817,18 +1821,19 @@
       pi: piSec,
       pb: h('div', null, h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox),
       learn: learnSec,
+      cat: catSec,
     };
     const tabBtns = {};
     const showTab = (k) => {
       Object.keys(pages).forEach((x) => { pages[x].style.display = x === k ? '' : 'none'; tabBtns[x].classList.toggle('on', x === k); });
     };
-    [['basic', '基本设置'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库'], ['learn', 'AI 学到的']].forEach(([k, t]) => {
+    [['basic', '基本设置'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库'], ['learn', 'AI 学到的'], ['cat', '车型资料']].forEach(([k, t]) => {
       tabBtns[k] = h('button', { class: 'ws-tab', onclick: () => showTab(k) }, t);
     });
     setDlg.appendChild(h('div', { class: 'ws-card' },
       h('div', { class: 'wp-head' }, h('b', null, '翻译助手设置'), h('button', { class: 'wp-x', onclick: () => { setDlg.style.display = 'none'; } }, '×')),
       h('div', { class: 'ws-tabs' }, Object.values(tabBtns)),
-      pages.basic, pages.pi, pages.pb, pages.learn,
+      pages.basic, pages.pi, pages.pb, pages.learn, pages.cat,
       h('div', { class: 'wp-btns ws-save', style: 'justify-content:flex-end;margin-top:10px' },
         h('button', { class: 'sec', onclick: () => {
           const data = JSON.stringify(ai.playbook(), null, 2);
@@ -1845,6 +1850,7 @@
           scanIncoming();
           piSec.save();
           learnSec.save();
+          catSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');
           if (panelView === 'pi' && getChatName()) openPI(false); // 刷新 PI 表单上方的提醒
@@ -2115,10 +2121,11 @@
   }
 
   /* ---------- 生成 PDF ---------- */
-  async function makePiFiles(pi, cfg, baseName) {
+  function makePiFiles(pi, cfg, baseName) { return makePdfFiles(renderPiPage(pi, cfg), baseName); }
+  // 把一个 794px 宽的页面元素生成 PDF（超过一页自动分页）和一张 JPG 预览图
+  async function makePdfFiles(page, baseName) {
     if (typeof html2canvas !== 'function' || !window.jspdf) throw new Error('PDF 组件没有加载成功，请刷新页面重试');
     const holder = h('div', { style: 'position:fixed;left:-20000px;top:0;z-index:-1' });
-    const page = renderPiPage(pi, cfg);
     holder.appendChild(page);
     document.body.appendChild(holder);
     try {
@@ -2404,6 +2411,430 @@
       cfg.validDays = parseInt(cfg.validDays, 10) || 15;
       piCfg.set(cfg);
     };
+    return sec;
+  }
+
+  /* ======================================================================
+   *  车型资料：导入资料包（配置参数 + 照片 + 视频）→ 一键发介绍、照片、规格书 PDF、视频
+   *  参数和价格只存在这台电脑的浏览器里：文字在 GM 存储（catalog / catPrice），照片视频在 IndexedDB（wat-media）
+   * ==================================================================== */
+  const catStore = {
+    get() { const c = store.get('catalog', null); return c && Array.isArray(c.groups) ? c : null; },
+    set(c) { store.set('catalog', c); },
+    price() { return Object.assign({ port: 'Belize City', freight: '', insurance: '', override: {} }, store.get('catPrice', {}) || {}); },
+    setPrice(p) { store.set('catPrice', p); },
+  };
+  // CIF 到港价：手动填的优先；否则 FOB + 运费 + 保险费（运费没填就算不出来）
+  function cifOf(v) {
+    const p = catStore.price();
+    const o = num(p.override && p.override[v.id]);
+    if (o != null) return o;
+    const f = num(p.freight);
+    if (f == null || v.fob == null) return null;
+    return v.fob + f + (num(p.insurance) || 0);
+  }
+  const groupHasCif = (g) => g.versions.some((v) => cifOf(v) != null);
+
+  const mediaDb = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('wat-media', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('media', { keyPath: 'id' });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => { dbp = null; rej(r.error || new Error('无法打开本地媒体库')); };
+    }));
+    const tx = async (mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction('media', mode);
+        const req = fn(t.objectStore('media'));
+        t.oncomplete = () => res(req ? req.result : undefined);
+        t.onerror = () => rej(t.error);
+        t.onabort = () => rej(t.error || new Error('保存失败（可能是磁盘空间不足）'));
+      });
+    };
+    return {
+      all: () => tx('readonly', (s) => s.getAll()),
+      put: (rec) => tx('readwrite', (s) => s.put(rec)),
+      del: (id) => tx('readwrite', (s) => s.delete(id)),
+      clear: () => tx('readwrite', (s) => s.clear()),
+    };
+  })();
+  const mediaFor = (list, gid) => list.filter((m) => !m.groups || !m.groups.length || m.groups.includes(gid))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB');
+
+  // 照片导入时压缩到最长边 1600px 的 JPG（原图动辄几 MB 到几十 MB）
+  async function compressImage(file) {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    return new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+  }
+  async function addMediaFile(file, groups, src) {
+    const isImg = /^image\//.test(file.type) || /\.(jpe?g|png|webp)$/i.test(file.name);
+    const isVid = /^video\//.test(file.type) || /\.(mp4|mov|3gp)$/i.test(file.name);
+    if (!isImg && !isVid) return null;
+    const base = file.name.replace(/^.*[\\/]/, '');
+    const blob = isImg ? await compressImage(file) : file;
+    const rec = {
+      id: 'm' + Date.now() + Math.random().toString(36).slice(2, 7), kind: isImg ? 'image' : 'video',
+      name: isImg ? base.replace(/\.\w+$/, '') + '.jpg' : base, type: isImg ? 'image/jpeg' : (file.type || 'video/mp4'),
+      size: blob.size, groups: groups || [], src: src || 'manual', at: Date.now(), blob,
+    };
+    await mediaDb.put(rec);
+    return rec;
+  }
+  // 导入资料包文件夹：里面一个 .json（车型参数），子文件夹名是适用的车型组（如 diesel+gasoline、ev），放照片和视频
+  async function importCatalogFolder(files, onProgress) {
+    const list = [...files];
+    const jf = list.find((f) => /\.json$/i.test(f.name));
+    if (!jf) throw new Error('文件夹里没有找到资料包 .json 文件');
+    let cat;
+    try { cat = JSON.parse(await jf.text()); } catch (e) { throw new Error('资料包 .json 文件格式不对'); }
+    if (!cat || cat.format !== 'wat-catalog-1' || !Array.isArray(cat.groups)) throw new Error('这不是车型资料包（format 不对）');
+    catStore.set(cat);
+    const ids = cat.groups.map((g) => g.id);
+    const old = (await mediaDb.all()).filter((m) => m.src === 'pack');
+    for (const m of old) await mediaDb.del(m.id); // 重新导入时替换上次资料包里的照片视频，手动添加的保留
+    const media = list.filter((f) => f !== jf && /\.(jpe?g|png|webp|mp4|mov|3gp)$/i.test(f.name));
+    let n = 0;
+    for (const f of media) {
+      const parts = (f.webkitRelativePath || f.name).split('/');
+      const folder = parts.length > 2 ? parts[parts.length - 2] : '';
+      const groups = folder.split('+').filter((x) => ids.includes(x));
+      if (await addMediaFile(f, groups, 'pack')) n++;
+      if (onProgress) onProgress(n, media.length);
+    }
+    return { cat, media: n };
+  }
+
+  /* ---------- 交给 AI 的车型资料（参数和 CIF 价） ---------- */
+  function catalogContext() {
+    const cat = catStore.get();
+    if (!cat) return '';
+    const p = catStore.price();
+    const out = cat.groups.map((g) => {
+      const lines = g.versions.map((v) => {
+        const key = (cat.keyRows || []).map((r) => (v.key && v.key[r.id] ? r.en + ' ' + v.key[r.id] : '')).filter(Boolean).join('; ');
+        const std = (cat.featRows || []).filter((f) => v.feat && v.feat[f.id] === 'S').map((f) => f.en).join(', ');
+        const opt = (cat.featRows || []).filter((f) => v.feat && v.feat[f.id] === 'O').map((f) => f.en).join(', ');
+        const cif = cifOf(v);
+        return '- ' + v.name + '：' + key + (std ? '；标配：' + std : '') + (opt ? '；选装：' + opt : '') +
+          (cif != null ? '；报价 CIF ' + p.port + ' USD ' + money(cif) : '');
+      });
+      return g.title.en + '（' + (g.zh || g.id) + '）\n' + lines.join('\n') + ((g.pending || []).length ? '\n待确认（不要给数字，说会尽快确认）：' + g.pending.join('；') : '');
+    });
+    return '【车型资料（参数以此为准；有报价的版本可以直接报 CIF 价，没有的不要编）】\n' + out.join('\n\n');
+  }
+
+  /* ---------- 规格书页面（客户看到的 PDF；全部内联样式） ---------- */
+  const SPEC_T = {
+    en: { title: 'SPECIFICATIONS', hl: 'Highlights', key: 'Key specifications', feat: 'Features', price: (port) => 'Price CIF ' + port + ' (USD)',
+      legend: '● Standard   ○ Optional   — Not available', date: 'Date', valid: 'Prices valid until' },
+    es: { title: 'FICHA TÉCNICA', hl: 'Puntos destacados', key: 'Especificaciones principales', feat: 'Equipamiento', price: (port) => 'Precio CIF ' + port + ' (USD)',
+      legend: '● De serie   ○ Opcional   — No disponible', date: 'Fecha', valid: 'Precios válidos hasta' },
+  };
+  function renderSpecPage(cat, g, lang, withPrice, heroUrl, cfg) {
+    const T = SPEC_T[lang] || SPEC_T.en;
+    const L = (o) => (o && (o[lang] || o.en)) || '';
+    const NAVY = '#0f2a44', GRAY = '#52606d', LINE = '#e4e7eb';
+    const p = catStore.price();
+    const vs = g.versions;
+    const page = h('div', { style: 'all:initial;display:block;box-sizing:border-box;width:794px;background:#fff;color:#1f2933;' +
+      'font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.45;padding:34px 40px' });
+    page.appendChild(h('div', { style: 'display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid ' + NAVY + ';padding-bottom:10px' },
+      h('div', { style: 'display:flex;gap:10px;align-items:center' },
+        cfg.logo ? h('img', { src: cfg.logo, style: 'width:44px;height:44px;object-fit:contain' }) : null,
+        h('div', null, h('div', { style: 'font-size:14px;font-weight:700;color:' + NAVY }, cfg.name),
+          h('div', { style: 'color:' + GRAY + ';font-size:10px' }, [cfg.phone, cfg.email, cfg.web].filter(Boolean).join(' · ')))),
+      h('div', { style: 'text-align:right' }, h('div', { style: 'font-size:20px;font-weight:700;letter-spacing:.05em;color:' + NAVY }, T.title),
+        h('div', { style: 'color:' + GRAY }, T.date + ': ' + fmtDate(new Date(), lang)))));
+    page.appendChild(h('div', { style: 'font-size:22px;font-weight:700;color:' + NAVY + ';margin:14px 0 8px' }, L(g.title)));
+    if (heroUrl) page.appendChild(h('img', { src: heroUrl, style: 'display:block;width:100%;height:300px;object-fit:cover;border-radius:6px' }));
+    const hl = (g.highlights && (g.highlights[lang] || g.highlights.en)) || [];
+    if (hl.length) {
+      page.appendChild(h('div', { style: 'margin:14px 0 4px;font-size:10px;letter-spacing:.06em;color:#7b8794;text-transform:uppercase' }, T.hl));
+      page.appendChild(h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:4px 18px' },
+        hl.map((x) => h('div', null, h('span', { style: 'color:#25a35a;font-weight:700' }, '✓ '), x))));
+    }
+    const colW = Math.floor(60 / vs.length) + '%';
+    const th = (t, w) => h('th', { style: 'background:' + NAVY + ';color:#fff;font-weight:600;font-size:10.5px;padding:7px 6px;text-align:' + (w ? 'center;width:' + w : 'left') }, t);
+    const sec = (t) => h('tr', null, h('td', { colspan: String(vs.length + 1), style: 'background:#f0f4f8;color:' + NAVY + ';font-weight:700;padding:6px' }, t));
+    const row = (label, vals, bold) => h('tr', null,
+      h('td', { style: 'padding:5px 6px;border-bottom:1px solid ' + LINE + ';color:' + GRAY }, label),
+      vals.map((x) => h('td', { style: 'padding:5px 6px;border-bottom:1px solid ' + LINE + ';text-align:center' + (bold ? ';font-weight:700;font-size:12px;color:' + NAVY : '') }, x || '—')));
+    const table = h('table', { style: 'width:100%;border-collapse:collapse;margin-top:14px;font-size:11px;line-height:1.35;font-family:Arial,Helvetica,sans-serif;color:#1f2933' },
+      h('tr', null, th(''), vs.map((v) => th(v.name, colW))));
+    if (withPrice) table.appendChild(row(T.price(p.port), vs.map((v) => { const c = cifOf(v); return c == null ? '' : money(c); }), true));
+    table.appendChild(sec(T.key));
+    const tbd = lang === 'es' ? 'Por confirmar' : 'To be confirmed';
+    (cat.keyRows || []).forEach((r) => {
+      const vals = vs.map((v) => { const x = (v.key && v.key[r.id]) || ''; return /^(TBD|待定)$/i.test(x) ? tbd : x; });
+      if (vals.some(Boolean)) table.appendChild(row(L(r), vals));
+    });
+    table.appendChild(sec(T.feat));
+    const mark = { S: '●', O: '○' };
+    (cat.featRows || []).forEach((f) => { const vals = vs.map((v) => mark[v.feat && v.feat[f.id]] || ''); if (vals.some(Boolean)) table.appendChild(row(L(f), vals)); });
+    page.appendChild(table);
+    page.appendChild(h('div', { style: 'margin-top:8px;color:' + GRAY + ';font-size:10px' }, T.legend));
+    const notes = [L(cat.notes)];
+    if (withPrice) notes.push(T.valid + ' ' + fmtDate(new Date(Date.now() + (num(cfg.validDays) || 15) * 86400000), lang) + '.');
+    page.appendChild(h('div', { style: 'margin-top:6px;color:#7b8794;font-size:9.5px' }, notes.filter(Boolean).join(' ')));
+    return page;
+  }
+  const blobToDataUrl = (blob) => new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+
+  /* ---------- 右栏：发车型资料 ---------- */
+  function guessGroup(cat) {
+    const t = readConversation(40).map((m) => m.text).join(' ').toLowerCase();
+    const has = (id) => cat.groups.some((g) => g.id === id);
+    if (has('ev') && /\b(ev|electric|eléctric|electrica|battery|batería|charg|carga)\b/.test(t)) return 'ev';
+    if (has('gasoline') && /\b(gasoline|petrol|gasolina)\b/.test(t)) return 'gasoline';
+    return has('diesel') ? 'diesel' : cat.groups[0].id;
+  }
+  const catSel = {}; // 每个聊天记住上次选的车型组
+  async function openCatalog() {
+    const chatName = getChatName();
+    if (!chatName) { toast('请先打开客户聊天', true); return; }
+    panelChat = chatName;
+    panelView = 'cat';
+    const cat = catStore.get();
+    if (!cat) {
+      showPanel(h('div', { style: 'padding:20px 0;text-align:center' }, h('div', { class: 'wp-muted', style: 'margin-bottom:10px' }, '还没有导入车型资料'),
+        h('button', { onclick: () => openSettings('cat') }, '去导入')), '发车型资料');
+      return;
+    }
+    let all = [];
+    try { all = await mediaDb.all(); } catch (e) { toast('读取照片视频失败：' + e.message, true); }
+    if (getChatName() !== chatName || panelView !== 'cat') return;
+    const gid = catSel[chatName] && cat.groups.some((g) => g.id === catSel[chatName]) ? catSel[chatName] : guessGroup(cat);
+    catSel[chatName] = gid;
+    renderCatalogPanel(cat, cat.groups.find((g) => g.id === gid), all, chatName);
+  }
+
+  function renderCatalogPanel(cat, g, all, chatName) {
+    const lang = getChatLang() === 'es' ? 'es' : 'en';
+    const urls = [];
+    const imgs = mediaFor(all, g.id).filter((m) => m.kind === 'image');
+    const vids = mediaFor(all, g.id).filter((m) => m.kind === 'video');
+    const picked = new Set(imgs.slice(0, 4).map((m) => m.id));
+    const pickedV = new Set();
+    const hasCif = groupHasCif(g);
+
+    const tabs = h('div', { class: 'ask-top' }, cat.groups.map((x) => h('button', {
+      class: x.id === g.id ? '' : 'sec',
+      onclick: () => { catSel[chatName] = x.id; urls.forEach((u) => URL.revokeObjectURL(u)); renderCatalogPanel(cat, x, all, chatName); },
+    }, x.zh || x.id)));
+
+    // 介绍文字
+    const intro = h('textarea', { class: 'wr-draft', rows: '7', placeholder: '点下面的按钮生成介绍，也可以直接写' });
+    const introZh = h('div', { class: 'wp-zh' });
+    let introAi = false;
+    const stdBtn = h('button', { class: 'sec', onclick: () => {
+      const hl = (g.highlights && (g.highlights[lang] || g.highlights.en)) || [];
+      const cifs = g.versions.map(cifOf).filter((x) => x != null);
+      const p = catStore.price();
+      const priceLine = priceIn.checked && cifs.length ? (lang === 'es' ? '\nPrecio CIF ' + p.port + ': desde USD ' : '\nPrice CIF ' + p.port + ': from USD ') + money(Math.min(...cifs)) : '';
+      intro.value = (lang === 'es' ? 'Te presento la ' : 'Here is the ') + ((g.title && (g.title[lang] || g.title.en)) || '') + ':\n' +
+        hl.map((x) => '• ' + x).join('\n') + priceLine + '\n' +
+        (lang === 'es' ? 'Te envío fotos y la ficha técnica completa. ¿Qué versión te interesa?' : "I'm sending you photos and the full spec sheet. Which version are you interested in?");
+      introZh.textContent = ''; introAi = false;
+    } }, '标准介绍');
+    const aiBtn = h('button', { class: 'sec' }, 'AI 按客户需求写');
+    aiBtn.onclick = async () => {
+      if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
+      aiBtn.disabled = true; aiBtn.textContent = '写作中…';
+      try {
+        const conv = readConversation(40);
+        const system = baseContext(conv, chatName) + '\n\n' + [
+          '【本次任务：给这位客户写一条介绍「' + g.title.en + '」的 WhatsApp 消息】',
+          '- 从【车型资料】里挑 3～4 个和这位客户需求最相关的卖点（比如他关心的用途、对比的品牌、预算、里程或油耗），用他的语言、按这位销售的风格写，不超过 80 个单词，可以分行。',
+          '- 参数只能来自【车型资料】，标了「待确认」的不要给数字。' + (priceIn.checked && hasCif ? '可以提 CIF 起价。' : '不要提价格。'),
+          '- 结尾说明会发照片和规格书，并问一个推进的问题（比如他更想要哪个版本）。',
+          '- 只输出 JSON：{"reply":"客户语言的消息","reply_zh":"中文意思"}',
+        ].join('\n');
+        const { json } = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: convText(conv, chatName) }], 800);
+        if (!json || !json.reply) throw new Error('AI 没有写出介绍，请重试');
+        intro.value = String(json.reply); introZh.textContent = json.reply_zh ? '中文：' + json.reply_zh : ''; introAi = true;
+      } catch (e) { toast(e.message, true); } finally { aiBtn.disabled = false; aiBtn.textContent = 'AI 按客户需求写'; }
+    };
+
+    // 照片
+    const grid = h('div', { style: 'display:grid;grid-template-columns:repeat(4,1fr);gap:6px' });
+    imgs.forEach((m) => {
+      const u = URL.createObjectURL(m.blob); urls.push(u);
+      const im = h('img', { src: u, title: m.name, style: 'width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;cursor:pointer;box-sizing:border-box' });
+      const paint = () => { im.style.outline = picked.has(m.id) ? '3px solid #25d366' : '1px solid #d1d7db'; im.style.opacity = picked.has(m.id) ? '1' : '.55'; };
+      im.onclick = () => { if (picked.has(m.id)) picked.delete(m.id); else picked.add(m.id); paint(); refreshSend(); };
+      paint(); grid.appendChild(im);
+    });
+
+    // 规格书
+    const specIn = h('input', { type: 'checkbox' }); specIn.checked = true;
+    const priceIn = h('input', { type: 'checkbox' }); priceIn.checked = hasCif; priceIn.disabled = !hasCif;
+    const langSel = h('select', { class: 'pi-in', style: 'width:auto' }, h('option', { value: 'en' }, 'English'), h('option', { value: 'es' }, 'Español'));
+    langSel.value = lang;
+    const heroUrl = async () => { const m = imgs.find((x) => picked.has(x.id)) || imgs[0]; return m ? blobToDataUrl(m.blob) : ''; };
+    const specPage = async () => renderSpecPage(cat, g, langSel.value, priceIn.checked && hasCif, await heroUrl(), piCfg.get());
+    const prevBtn = h('button', { class: 'sec' }, '预览规格书');
+    prevBtn.onclick = async () => { prevBtn.disabled = true; try { showPiPreview(await specPage()); } catch (e) { toast(e.message, true); } finally { prevBtn.disabled = false; } };
+
+    // 视频
+    const vidBox = h('div');
+    vids.forEach((m) => {
+      const cb = h('input', { type: 'checkbox' });
+      cb.onchange = () => { if (cb.checked) pickedV.add(m.id); else pickedV.delete(m.id); refreshSend(); };
+      vidBox.appendChild(h('label', { class: 'ws-inline', style: 'display:flex;gap:6px;align-items:center;margin:3px 0' }, cb, '🎬 ' + m.name + '（' + fmtSize(m.size) + '）'));
+    });
+
+    const sendBtn = h('button');
+    const refreshSend = () => {
+      const parts = [picked.size ? '照片 ' + picked.size + ' 张' : '', specIn.checked ? '规格书' : '', pickedV.size ? '视频 ' + pickedV.size + ' 个' : ''].filter(Boolean);
+      sendBtn.textContent = parts.length ? '放进聊天：' + parts.join(' + ') : '请先选择要发的内容';
+      sendBtn.disabled = !parts.length;
+    };
+    specIn.onchange = refreshSend;
+    sendBtn.onclick = async () => {
+      const old = sendBtn.textContent; sendBtn.disabled = true; sendBtn.textContent = '生成中…';
+      try {
+        const files = imgs.filter((m) => picked.has(m.id)).map((m) => new File([m.blob], m.name, { type: m.type }));
+        if (specIn.checked) {
+          const f = await makePdfFiles(await specPage(), 'RELY_R8_' + g.id + '_' + (langSel.value === 'es' ? 'Ficha_Tecnica' : 'Spec_Sheet'));
+          files.push(f.img, f.pdf);
+        }
+        vids.filter((m) => pickedV.has(m.id)).forEach((m) => files.push(new File([m.blob], m.name, { type: m.type })));
+        if (getChatName() !== chatName) throw new Error('聊天已切换，已取消');
+        await attachToChat(files);
+        toast('已放进发送预览（' + files.length + ' 个文件），确认后点发送');
+      } catch (e) { toast(e.message, true); } finally { sendBtn.textContent = old; refreshSend(); }
+    };
+    refreshSend();
+
+    const box = h('div', null,
+      tabs,
+      h('div', { class: 'wp-sec', style: 'margin-top:4px' }, '① 介绍文字（' + (lang === 'es' ? '西语' : '英语') + '）'),
+      intro, introZh,
+      h('div', { class: 'wp-btns' }, stdBtn, aiBtn,
+        h('button', { onclick: () => { if (intro.value.trim()) fillInput(intro.value.trim(), { ai: introAi }); else toast('介绍是空的', true); } }, '填入聊天')),
+      h('div', { class: 'wp-sec' }, '② 照片（点图片选择 / 取消）'),
+      imgs.length ? grid : h('div', { class: 'wp-muted' }, '这个车型还没有照片，去 ⚙ 设置 → 车型资料 添加'),
+      h('div', { class: 'wp-sec' }, '③ 规格书 PDF（附一张预览图）'),
+      h('label', { class: 'ws-inline', style: 'display:flex;gap:6px;align-items:center' }, specIn, '发送规格书'),
+      h('label', { class: 'ws-inline', style: 'display:flex;gap:6px;align-items:center;margin-top:3px' }, priceIn,
+        hasCif ? '带 CIF ' + catStore.price().port + ' 到港价' : '带到港价（还没设置运费，', hasCif ? null : h('a', { href: '#', onclick: (e) => { e.preventDefault(); openSettings('cat'); } }, '去设置'), hasCif ? null : '）'),
+      h('div', { class: 'wp-btns' }, langSel, prevBtn),
+      vids.length ? h('div', { class: 'wp-sec' }, '④ 视频（文件较大，发送会慢一些）') : null,
+      vids.length ? vidBox : null,
+      h('div', { class: 'wp-foot pi-actions' }, sendBtn),
+      h('div', { class: 'wp-muted', style: 'margin-top:6px' }, '建议：先填入介绍文字并发送，再点上面的按钮发照片和规格书。不会自动发送，都要你确认。'));
+    showPanel(box, '发车型资料');
+  }
+
+  /* ---------- 设置 → 车型资料 ---------- */
+  function catalogSettingsSection() {
+    const p = catStore.price();
+    const portIn = h('input', { type: 'text' }); portIn.value = p.port;
+    const freightIn = h('input', { type: 'text', placeholder: '每台运费，如 2800' }); freightIn.value = p.freight;
+    const insIn = h('input', { type: 'text', placeholder: '每台保险费，如 80（可不填）' }); insIn.value = p.insurance;
+    const override = Object.assign({}, p.override || {});
+    const info = h('div', { class: 'wp-muted' });
+    const priceBox = h('div');
+    const mediaBox = h('div', { class: 'ws-pb' });
+    const tmpPrice = () => ({ port: portIn.value.trim() || 'Belize City', freight: freightIn.value.trim(), insurance: insIn.value.trim(), override });
+    const renderPrices = () => {
+      const cat = catStore.get();
+      priceBox.innerHTML = '';
+      if (!cat) return;
+      const keep = catStore.price();
+      catStore.setPrice(tmpPrice()); // 临时用输入框里的值计算，关闭不保存时恢复
+      const tbl = h('table', { style: 'width:100%;border-collapse:collapse;font-size:12px;margin-top:6px' },
+        h('tr', null, ['版本', 'FOB', '手动 CIF（可不填）', 'CIF 到港价'].map((t) => h('th', { style: 'text-align:left;border-bottom:1px solid #e9edef;padding:3px' }, t))));
+      cat.groups.forEach((g) => g.versions.forEach((v) => {
+        const o = h('input', { type: 'text', style: 'width:90px', placeholder: '—' });
+        o.value = override[v.id] == null ? '' : override[v.id];
+        const cif = cifOf(v);
+        o.onchange = () => { if (o.value.trim()) override[v.id] = o.value.trim(); else delete override[v.id]; renderPrices(); };
+        tbl.appendChild(h('tr', null,
+          h('td', { style: 'padding:3px' }, (g.zh || g.id) + ' ' + v.name),
+          h('td', { style: 'padding:3px' }, v.fob == null ? '—' : money(v.fob)),
+          h('td', { style: 'padding:3px' }, o),
+          h('td', { style: 'padding:3px;font-weight:600' }, cif == null ? '—' : money(cif))));
+      }));
+      catStore.setPrice(keep);
+      priceBox.appendChild(tbl);
+    };
+    [freightIn, insIn, portIn].forEach((x) => x.addEventListener('input', renderPrices));
+    const groupSel = (cur, onChange) => {
+      const cat = catStore.get();
+      const s = h('select', { class: 'pi-in', style: 'width:auto' }, h('option', { value: '' }, '全部车型'),
+        (cat ? cat.groups : []).map((g) => h('option', { value: g.id }, g.zh || g.id)));
+      if (cur && cur.length > 1) s.appendChild(h('option', { value: cur.join('+') }, cur.map((id) => { const g = cat && cat.groups.find((x) => x.id === id); return (g && g.zh) || id; }).join(' + ')));
+      s.value = (cur && cur.length) ? cur.join('+') : '';
+      if (onChange) s.onchange = () => onChange(s.value ? s.value.split('+') : []);
+      return s;
+    };
+    const renderMedia = async () => {
+      const cat = catStore.get();
+      let all = [];
+      try { all = await mediaDb.all(); } catch (e) { info.textContent = '读取本地媒体库失败：' + e.message; return; }
+      info.textContent = cat
+        ? '已导入「' + (cat.name || '车型资料') + '」（' + (cat.updated || '') + '）：' + cat.groups.length + ' 个车型、' + cat.groups.reduce((s, g) => s + g.versions.length, 0) + ' 个版本；照片 ' +
+          all.filter((m) => m.kind === 'image').length + ' 张、视频 ' + all.filter((m) => m.kind === 'video').length + ' 个。'
+        : '还没有导入车型资料。点「导入资料包文件夹」，选 D:\\威麟\\WhatsApp资料包。';
+      mediaBox.innerHTML = '';
+      all.sort((a, b) => a.name.localeCompare(b.name)).forEach((m) => {
+        const thumb = m.kind === 'image' ? h('img', { src: URL.createObjectURL(m.blob), style: 'width:48px;height:36px;object-fit:cover;border-radius:4px' }) : h('span', { style: 'font-size:22px' }, '🎬');
+        mediaBox.appendChild(h('div', { class: 'ws-pbi', style: 'align-items:center' }, thumb,
+          h('span', { class: 'ws-pbt' }, m.name, h('div', { class: 'wp-muted' }, fmtSize(m.size))),
+          groupSel(m.groups, async (gs) => { m.groups = gs; await mediaDb.put(m); }),
+          h('button', { class: 'sec', title: '删除', onclick: async () => { await mediaDb.del(m.id); renderMedia(); } }, '删')));
+      });
+      if (!all.length) mediaBox.appendChild(h('div', { class: 'wp-muted', style: 'padding:8px' }, '还没有照片和视频'));
+    };
+    const folderIn = h('input', { type: 'file', style: 'display:none' });
+    folderIn.webkitdirectory = true; folderIn.multiple = true;
+    const folderBtn = h('button', { onclick: () => folderIn.click() }, '导入资料包文件夹');
+    folderIn.onchange = async () => {
+      if (!folderIn.files.length) return;
+      folderBtn.disabled = true;
+      try {
+        const r = await importCatalogFolder(folderIn.files, (n, t) => { folderBtn.textContent = '导入中 ' + n + '/' + t + '…'; });
+        toast('已导入「' + (r.cat.name || '车型资料') + '」，照片和视频 ' + r.media + ' 个');
+        renderPrices(); renderMedia();
+      } catch (e) { toast('导入失败：' + e.message, true); } finally { folderBtn.disabled = false; folderBtn.textContent = '导入资料包文件夹'; folderIn.value = ''; }
+    };
+    let addGroups = [];
+    const addIn = h('input', { type: 'file', multiple: 'multiple', accept: 'image/*,video/*', style: 'display:none' });
+    const addBtn = h('button', { class: 'sec', onclick: () => addIn.click() }, '添加照片/视频');
+    addIn.onchange = async () => {
+      addBtn.disabled = true;
+      let n = 0;
+      try { for (const f of [...addIn.files]) { if (await addMediaFile(f, addGroups, 'manual')) n++; addBtn.textContent = '添加中 ' + n + '…'; } toast('已添加 ' + n + ' 个'); }
+      catch (e) { toast('添加失败：' + e.message, true); } finally { addBtn.disabled = false; addBtn.textContent = '添加照片/视频'; addIn.value = ''; renderMedia(); }
+    };
+    const sec = h('div', null,
+      h('div', { class: 'wp-muted', style: 'margin-top:8px' }, '车型参数、价格、照片和视频只保存在这台电脑的浏览器里。换电脑或清除浏览器数据后要重新导入。'),
+      h('div', { class: 'wp-btns', style: 'margin-top:8px;flex-wrap:wrap;align-items:center' }, folderBtn, folderIn, addBtn, addIn,
+        h('span', { class: 'wp-muted' }, '添加到：'), groupSel([], (gs) => { addGroups = gs; }),
+        h('button', { class: 'sec', onclick: async () => {
+          if (!confirmInline(null, '将清空车型资料、照片和视频（价格设置保留）')) return;
+          store.set('catalog', null); await mediaDb.clear(); renderPrices(); renderMedia();
+        } }, '清空')),
+      info,
+      h('label', null, '到港价 CIF：FOB + 每台运费 + 每台保险费（也可以按版本手动填）'),
+      h('div', { class: 'pi-row', style: 'display:flex;gap:8px' },
+        h('div', { style: 'flex:1' }, h('label', null, '目的港'), portIn),
+        h('div', { style: 'flex:1' }, h('label', null, '每台运费 USD'), freightIn),
+        h('div', { style: 'flex:1' }, h('label', null, '每台保险费 USD'), insIn)),
+      priceBox,
+      h('label', null, '照片和视频（选「适用车型」，发资料时只显示对应车型的）'), mediaBox);
+    renderPrices(); renderMedia();
+    sec.save = () => catStore.setPrice(tmpPrice());
     return sec;
   }
 

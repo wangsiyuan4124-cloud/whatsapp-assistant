@@ -1,0 +1,161 @@
+{
+ "format": "wat-catalog-1",
+ "name": "TEST R8",
+ "updated": "2026-01-01",
+ "notes": {
+  "en": "Test note.",
+  "es": "Nota de prueba."
+ },
+ "keyRows": [
+  {
+   "id": "dims",
+   "en": "Length × width × height (mm)",
+   "es": "Largo × ancho × alto (mm)"
+  },
+  {
+   "id": "engine",
+   "en": "Engine",
+   "es": "Motor"
+  },
+  {
+   "id": "battery",
+   "en": "Battery (kWh)",
+   "es": "Batería (kWh)"
+  },
+  {
+   "id": "range",
+   "en": "Range (km)",
+   "es": "Autonomía (km)"
+  }
+ ],
+ "featRows": [
+  {
+   "id": "carplay",
+   "en": "Wireless CarPlay",
+   "es": "CarPlay inalámbrico"
+  },
+  {
+   "id": "cam360",
+   "en": "360° camera",
+   "es": "Cámara 360°"
+  },
+  {
+   "id": "outlet",
+   "en": "220 V outlet",
+   "es": "Toma de 220 V"
+  }
+ ],
+ "groups": [
+  {
+   "id": "diesel",
+   "zh": "柴油版",
+   "title": {
+    "en": "TEST Diesel",
+    "es": "TEST Diésel"
+   },
+   "highlights": {
+    "en": [
+     "Diesel point A",
+     "Diesel point B"
+    ],
+    "es": [
+     "Punto A",
+     "Punto B"
+    ]
+   },
+   "pending": [],
+   "versions": [
+    {
+     "id": "diesel-1",
+     "name": "6MT Comfort",
+     "fob": 1000,
+     "key": {
+      "dims": "5000×1900×1800",
+      "engine": "T1 diesel"
+     },
+     "feat": {
+      "carplay": "S"
+     }
+    },
+    {
+     "id": "diesel-2",
+     "name": "8AT Limited",
+     "fob": 2000,
+     "key": {
+      "dims": "5000×1900×1800",
+      "engine": "T1 diesel"
+     },
+     "feat": {
+      "carplay": "S",
+      "cam360": "S"
+     }
+    }
+   ]
+  },
+  {
+   "id": "gasoline",
+   "zh": "汽油版",
+   "title": {
+    "en": "TEST Gasoline",
+    "es": "TEST Gasolina"
+   },
+   "highlights": {
+    "en": [
+     "Gas point"
+    ],
+    "es": [
+     "Punto gas"
+    ]
+   },
+   "pending": [],
+   "versions": [
+    {
+     "id": "gasoline-1",
+     "name": "5MT 2WD",
+     "fob": 500,
+     "key": {
+      "dims": "5000×1900×1800",
+      "engine": "G1 gasoline"
+     },
+     "feat": {
+      "cam360": "O"
+     }
+    }
+   ]
+  },
+  {
+   "id": "ev",
+   "zh": "EV 纯电版",
+   "title": {
+    "en": "TEST EV",
+    "es": "TEST EV"
+   },
+   "highlights": {
+    "en": [
+     "EV point"
+    ],
+    "es": [
+     "Punto EV"
+    ]
+   },
+   "pending": [
+    "续航待确认"
+   ],
+   "versions": [
+    {
+     "id": "ev-1",
+     "name": "EV 2WD",
+     "fob": 3000,
+     "key": {
+      "dims": "5000×1900×1900",
+      "battery": "88",
+      "range": "TBD"
+     },
+     "feat": {
+      "outlet": "S"
+     }
+    }
+   ]
+  }
+ ]
+}

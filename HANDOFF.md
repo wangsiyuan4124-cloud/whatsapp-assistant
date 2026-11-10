@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.7.5**，一个文件，约 2100 行，没有构建步骤。
+当前版本：**v1.7.6**，一个文件，约 2100 行，没有构建步骤。
 
 ## 2. 功能清单
 
@@ -24,7 +24,8 @@
 | 建议回复操作 | 填入、和 AI 多轮修改（子页面，有「← 返回」）、换一条、收藏到话术库。 |
 | AI 助手 | 右栏第二个标签页。**独立对话，和客户无关**（像豆包 / DeepSeek App），有新对话、历史、加宽、「📎 引用当前客户聊天」（只附在下一条提问）。纯文本回答；只有用户明确要回复客户时，才用【可发给客户】…【/可发给客户】标记附上可填入的回复。 |
 | PI 形式发票 | AI 从聊天提取 → 右栏表单（缺的标黄）→ 预览 → 生成 A4 PDF 加一张 JPG → 粘贴进 WhatsApp 发送预览（不会自动发送）。英文版和西语版，金额大写，编号 `PI-YYYYMMDD-NNN`，按客户存草稿。开票公司：BOUNDLESS AUTOMOTIVE LIMITED（無界汽車有限公司，香港）。 |
-| 设置 | ⚙ 打开，三个标签页：基本设置（DeepSeek Key、业务介绍、价格表与交易条款、分级标准、自动加入列表开关）、PI 发票（公司、银行、Logo、公章、默认条款）、话术库。 |
+| 发车型资料 | 右栏「🚗 发车型资料」（子页面）：选车型组（柴油 / 汽油 / EV，按聊天内容猜一个默认值）→ ① 介绍文字（「标准介绍」用资料包里的卖点；「AI 按客户需求写」挑和客户相关的卖点）→ 填入聊天；② 点选照片；③ 规格书 PDF（英 / 西，可带 CIF 到港价，附一张 JPG 预览图）；④ 视频 → 一次粘贴进发送预览（不会自动发送）。资料包是本地文件夹（见第 10 节），在「设置 → 车型资料」导入：一个 `.json` + 按子文件夹名（如 `diesel+gasoline`、`ev`）分组的照片和视频；照片导入时压缩到 1600px JPG，照片视频存在 IndexedDB `wat-media`。CIF = FOB + 每台运费 + 每台保险费，可按版本手动填。车型参数和 CIF 价会加进所有 AI 提示词（`catalogContext`，不含 FOB）。 |
+| 设置 | ⚙ 打开，标签页：基本设置（DeepSeek Key、业务介绍、价格表与交易条款、分级标准、自动加入列表开关）、PI 发票（公司、银行、Logo、公章、默认条款）、话术库。 |
 
 ## 3. 代码结构（按文件里的分节注释）
 
@@ -34,14 +35,15 @@
 - 悬浮工具栏 `ui`（`ui.position` 每 500ms 执行一次：三栏时贴在右栏的 `#wat-barslot` 位置）
 - **学习模块**（在客户分析模块前面）：`recordSentFromInput`、`harvestHistory`、`recordAsk`、`similarSamples`、`styleContext`、`learnStyle`；设置页 `learnSettingsSection`
 - **客户分析模块**：`baseContext(conv, chatName)`（传了 conv 才附相似回复）、`buildPrompt`、`callDeepSeek`（带重试和宽松 JSON 解析）、`applyLevelList`、`showPanel`、状态行 `setStatus` / `panelNotice`、`convFingerprint`、`renderResult`、`openRefine`、`anotherSuggestion`、AI 助手 `openAsk` / `renderHistory`、`analyzeCurrent`、`syncPanel`、设置面板 `openSettings(tab)`
-- **PI 模块**：`renderPiPage`（全部内联样式，794px 宽）、`makePiFiles`（html2canvas 生成图片，再用 jsPDF 生成 PDF）、`attachToChat`、`extractPiFromChat`、`renderPiEditor`、`piSettingsSection`
+- **PI 模块**：`renderPiPage`（全部内联样式，794px 宽）、`makePdfFiles`（通用：html2canvas 生成图片，再用 jsPDF 生成 PDF，超过一页自动分页；`makePiFiles` 调它）、`attachToChat`、`extractPiFromChat`、`renderPiEditor`、`piSettingsSection`
+- **车型资料模块**：`catStore`、`cifOf`、`mediaDb`（IndexedDB）、`importCatalogFolder`、`catalogContext`、`renderSpecPage`（规格书，内联样式，表格要显式写字号）、`openCatalog` / `renderCatalogPanel`、`catalogSettingsSection`
 - 工具栏拖动、启动
 
 依赖：通过 `@require` 从 cdnjs 加载 html2canvas 1.4.1 和 jsPDF 2.5.1。`@connect` 允许访问谷歌翻译、微软翻译、api.deepseek.com。
 
 ### 存储（GM_setValue，只存在用户这台电脑的 Chrome 里）
 
-`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`myReplies`（你的回复样本，最多 800 条：`{at, chat, cust, zh?, sent, ai?, aiKept?, src: live|history}`）、`refineAsks`（修改要求，最多 200 条）、`styleProfile`（`{style, rules, at, n}`）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`。
+`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`myReplies`（你的回复样本，最多 800 条：`{at, chat, cust, zh?, sent, ai?, aiKept?, src: live|history}`）、`refineAsks`（修改要求，最多 200 条）、`styleProfile`（`{style, rules, at, n}`）、`catalog`（车型资料包，含 FOB）、`catPrice`（`{port, freight, insurance, override}`）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`。
 
 **仓库是公开的**：代码里绝不能放 API Key、银行信息、公章或 Logo 图片。
 
@@ -90,7 +92,7 @@
 
 - `app.js` 用 Lexical 搭了一个模拟输入框（`npm run build` 打包成 `app.bundle.js`）。`page*.html` 是逐步加了功能的模拟 WhatsApp 页面：消息行、列表菜单、`GM_*` 函数、模拟的翻译和 DeepSeek 返回。
 - `page6.html` 起，模拟页面会把「按 Esc 关聊天」计数（`chatClosed`）。`#keep` 参数模拟「点菜单项后菜单不关」的情况。
-- `t01`–`t12` 是 Playwright 脚本（`t10` 测 AI 发送翻译、术语表和失败退回；`t11` 测对方消息 AI 翻译；`t12` 测学习你的回复方式）。`t03`–`t10` 设置了 Key，所以先设 `aiIn=false`，免得对方消息的 AI 翻译打乱它们对 DeepSeek 调用次数的统计，输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
+- `t01`–`t12` 是 Playwright 脚本（`t10` 测 AI 发送翻译、术语表和失败退回；`t11` 测对方消息 AI 翻译；`t12` 测学习你的回复方式；`t13` 测车型资料，用 `fixtures/catalog/` 里的假资料包，价格都是假的）。`t03`–`t10` 设置了 Key，所以先设 `aiIn=false`，免得对方消息的 AI 翻译打乱它们对 DeepSeek 调用次数的统计，输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
 - 环境变量 `SCRIPT` 可以指定要测的脚本文件。
 - 模拟页面测不出 WhatsApp 改版的影响，重要改动发布后要请用户在真实页面上确认一次。
 
@@ -106,4 +108,5 @@
 ## 10. 用户本地文件
 
 - `D:\WhatsApp插件\`：脚本副本、`boundless-seal.png`（公章，已上传到插件设置）、`boundless-logo-pi.png`（Logo，已上传到插件设置）、`Boundless-Logo.zip`、`PI示例（测试数据）.pdf`
-- `D:\威麟\`：公司资料（银行等信息由用户自己在插件设置里填写）
+- `D:\威麟\`：公司资料（银行等信息由用户自己在插件设置里填写）。R8 配置表：`RELY  R8 Gasoline-Euro II Configuration and Pricing.xlsx`、`RELY R8 DIESEL Configurations and Prices.xlsx`（用「RELY R8 DIESEL 」表）、`RELY R8 EV Configurations and Prices.xlsx`，里面有 FOB 价
+- `D:\威麟\WhatsApp资料包\`：车型资料包（**含 FOB 价，绝不能提交到仓库**）。`R8车型资料.json` 由 `tests/make-catalog.js` 从上面三份配置表生成（版本名、卖点文案、待确认事项写在脚本里）；`diesel+gasoline\`（网站用的 14 张照片，按显示顺序编号）、`ev\`（EV 照片 10 张 + EV 广告视频）、`diesel\`（柴油广告视频）。配置表或价格更新后：重新跑脚本 → 在插件「设置 → 车型资料」重新导入文件夹
