@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.6
+// @version      1.7.7
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -1202,7 +1202,10 @@
   const applyPanelWidth = () => document.documentElement.style.setProperty('--wat-pw', (store.get('panelWide', false) ? PANEL_W_WIDE : PANEL_W) + 'px');
   applyPanelWidth();
   let panelChat = '';
-  let panelView = 'result'; // result | refine
+  let panelView = 'result'; // result | refine | pi | cat | ask
+  // 子页面「← 返回」去哪里：默认回客户分析；从发车型资料进的「改一改」要回发车型资料
+  let panelBack = null;
+  function goBack() { const f = panelBack; panelBack = null; (f || backToResult)(); }
 
   function dock(on) {
     const was = document.documentElement.classList.contains('wat-docked');
@@ -1217,7 +1220,7 @@
     panel.innerHTML = '';
     const sub = panelView === 'refine' || panelView === 'pi' || panelView === 'cat';
     panel.appendChild(h('div', { class: 'wp-head' },
-      sub ? h('button', { class: 'wp-back', title: '返回客户分析', onclick: backToResult }, '← 返回') : null,
+      sub ? h('button', { class: 'wp-back', title: '返回上一页', onclick: goBack }, '← 返回') : null,
       h('b', null, title || '客户分析'),
       h('span', { class: 'wp-sub' }, panelView === 'ask' ? '' : panelChat),
       h('button', { class: 'wp-x', title: '关闭整个右栏', onclick: () => dock(false) }, '×')));
@@ -1353,7 +1356,9 @@
   }
 
   /* ---------- 和 AI 多轮修改话术 ---------- */
-  function openRefine(sug, result) {
+  // opts.back(草稿, 中文)：返回时交回草稿（发车型资料用）；opts.title：页面标题；opts.extra：额外要求
+  function openRefine(sug, result, opts) {
+    opts = opts || {};
     panelView = 'refine';
     const chatName = getChatName();
     const conv = readConversation(40);
@@ -1362,6 +1367,7 @@
       '【本次任务：和销售一起修改一条准备发给客户的 WhatsApp 回复】',
       '- 销售会给出当前草稿（可能为空）和中文修改要求，你按要求改写。草稿里销售手动改过的内容要保留，除非要求里说要改。',
       '- 回复语言：' + lang + '。简短自然，像真人聊天。',
+      opts.extra || '',
       '- 只输出 JSON：{"reply":"客户语言的回复","reply_zh":"中文意思","note":"这次改了什么，一句中文"}',
       '',
       convText(conv, chatName),
@@ -1372,6 +1378,7 @@
     const draft = h('textarea', { class: 'wr-draft', rows: '5', placeholder: '还没有草稿。在下面告诉 AI 想写什么，比如：告诉客户下周有船，问他要不要先付定金锁车' });
     draft.value = sug.reply || '';
     const zhLine = h('div', { class: 'wp-zh' }, draftZh ? '中文：' + draftZh : '');
+    panelBack = opts.back ? () => opts.back(draft.value.trim(), draft.value.trim() === String(sug.reply || '').trim() ? (sug.reply_zh || '') : draftZh) : null;
     const thread = h('div', { class: 'wr-thread' });
     const ask = h('textarea', { class: 'wr-ask', rows: '2', placeholder: '告诉 AI 怎么改，比如：语气热情一点 / 改短一点 / 加上可以视频看车（Enter 发送，Shift+Enter 换行）' });
     const sendBtn = h('button', null, '发送');
@@ -1423,16 +1430,17 @@
       h('div', { class: 'wp-btns' },
         h('button', { onclick: () => { if (draft.value.trim()) fillInput(draft.value.trim(), { ai: true }); else toast('草稿是空的', true); } }, '填入聊天'),
         saveBtn,
-        h('button', { class: 'sec', onclick: backToResult }, '← 返回分析')),
+        h('button', { class: 'sec', onclick: goBack }, opts.back ? '← 用这条，返回' : '← 返回分析')),
       h('div', { class: 'wp-sec' }, '和 AI 对话修改'),
       thread,
       h('div', { class: 'wr-quick' }, quick.map((q) => h('button', { class: 'chip', onclick: () => send(q) }, q))),
       h('div', { class: 'wr-input' }, ask, sendBtn));
-    showPanel(box, '修改话术');
+    showPanel(box, opts.title || '修改话术');
     (draft.value ? ask : ask).focus();
   }
 
   function backToResult() {
+    panelBack = null;
     panelView = 'result';
     lastTab = 'result';
     if (!getChatName()) { panelChat = ''; setStatus(''); showPanel(h('div', { class: 'wp-muted', style: 'padding:24px 0;text-align:center' }, '打开一个客户聊天，这里会显示分析')); return; }
@@ -1770,6 +1778,7 @@
     if (name === panelChat) return;
     panelChat = name;
     notice = null;
+    panelBack = null;
     panelView = 'result';
     const saved = ai.analyses()[name];
     if (saved) {
@@ -2228,6 +2237,7 @@
     if (!chatName) { toast('请先打开客户聊天', true); return; }
     panelChat = chatName;
     panelView = 'pi';
+    panelBack = null;
     const drafts = store.get('piDrafts', {});
     if (drafts[chatName] && !fresh) { renderPiEditor(drafts[chatName], false); return; }
     let pi = blankPi(chatName);
@@ -2497,11 +2507,15 @@
     let cat;
     try { cat = JSON.parse(await jf.text()); } catch (e) { throw new Error('资料包 .json 文件格式不对'); }
     if (!cat || cat.format !== 'wat-catalog-1' || !Array.isArray(cat.groups)) throw new Error('这不是车型资料包（format 不对）');
+    // 资料包根目录下的 logo（如 logo.png）放进规格书页眉，不当作车型照片
+    const depth = (f) => (f.webkitRelativePath || f.name).split('/').length;
+    const lf = list.find((f) => depth(f) <= 2 && /logo/i.test(f.name) && /\.(png|jpe?g|webp|svg)$/i.test(f.name));
+    if (lf) cat.logo = await blobToDataUrl(lf);
     catStore.set(cat);
     const ids = cat.groups.map((g) => g.id);
     const old = (await mediaDb.all()).filter((m) => m.src === 'pack');
     for (const m of old) await mediaDb.del(m.id); // 重新导入时替换上次资料包里的照片视频，手动添加的保留
-    const media = list.filter((f) => f !== jf && /\.(jpe?g|png|webp|mp4|mov|3gp)$/i.test(f.name));
+    const media = list.filter((f) => f !== jf && f !== lf && /\.(jpe?g|png|webp|mp4|mov|3gp)$/i.test(f.name));
     let n = 0;
     for (const f of media) {
       const parts = (f.webkitRelativePath || f.name).split('/');
@@ -2545,11 +2559,12 @@
     const NAVY = '#0f2a44', GRAY = '#52606d', LINE = '#e4e7eb';
     const p = catStore.price();
     const vs = g.versions;
+    const logo = cat.logo || cfg.logo; // 资料包自带的 logo 优先，其次用 PI 设置里的
     const page = h('div', { style: 'all:initial;display:block;box-sizing:border-box;width:794px;background:#fff;color:#1f2933;' +
       'font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.45;padding:34px 40px' });
     page.appendChild(h('div', { style: 'display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid ' + NAVY + ';padding-bottom:10px' },
       h('div', { style: 'display:flex;gap:10px;align-items:center' },
-        cfg.logo ? h('img', { src: cfg.logo, style: 'width:44px;height:44px;object-fit:contain' }) : null,
+        logo ? h('img', { src: logo, style: 'width:48px;height:48px;object-fit:contain' }) : null,
         h('div', null, h('div', { style: 'font-size:14px;font-weight:700;color:' + NAVY }, cfg.name),
           h('div', { style: 'color:' + GRAY + ';font-size:10px' }, [cfg.phone, cfg.email, cfg.web].filter(Boolean).join(' · ')))),
       h('div', { style: 'text-align:right' }, h('div', { style: 'font-size:20px;font-weight:700;letter-spacing:.05em;color:' + NAVY }, T.title),
@@ -2598,11 +2613,13 @@
     return has('diesel') ? 'diesel' : cat.groups[0].id;
   }
   const catSel = {}; // 每个聊天记住上次选的车型组
+  const catState = {}; // 「聊天|车型组」→ 介绍文字、选中的照片视频、规格书选项
   async function openCatalog() {
     const chatName = getChatName();
     if (!chatName) { toast('请先打开客户聊天', true); return; }
     panelChat = chatName;
     panelView = 'cat';
+    panelBack = null;
     const cat = catStore.get();
     if (!cat) {
       showPanel(h('div', { style: 'padding:20px 0;text-align:center' }, h('div', { class: 'wp-muted', style: 'margin-bottom:10px' }, '还没有导入车型资料'),
@@ -2622,9 +2639,13 @@
     const urls = [];
     const imgs = mediaFor(all, g.id).filter((m) => m.kind === 'image');
     const vids = mediaFor(all, g.id).filter((m) => m.kind === 'video');
-    const picked = new Set(imgs.slice(0, 4).map((m) => m.id));
-    const pickedV = new Set();
     const hasCif = groupHasCif(g);
+    // 每个聊天、每个车型组记住填过的介绍和选过的照片（去「改一改」再回来不丢）
+    const key = chatName + '|' + g.id;
+    const st = catState[key] || (catState[key] = { intro: '', introZh: '', introAi: false, picked: null, pickedV: [], spec: true, price: hasCif, lang });
+    const picked = new Set(st.picked || imgs.slice(0, 4).map((m) => m.id));
+    const pickedV = new Set(st.pickedV);
+    const keepPicks = () => { st.picked = [...picked]; st.pickedV = [...pickedV]; };
 
     const tabs = h('div', { class: 'ask-top' }, cat.groups.map((x) => h('button', {
       class: x.id === g.id ? '' : 'sec',
@@ -2634,17 +2655,31 @@
     // 介绍文字
     const intro = h('textarea', { class: 'wr-draft', rows: '7', placeholder: '点下面的按钮生成介绍，也可以直接写' });
     const introZh = h('div', { class: 'wp-zh' });
-    let introAi = false;
+    const setIntro = (text, zh, isAi) => {
+      intro.value = text; introZh.textContent = zh ? '中文：' + zh : '';
+      st.intro = text; st.introZh = zh || ''; st.introAi = !!isAi;
+    };
+    setIntro(st.intro, st.introZh, st.introAi);
+    intro.addEventListener('input', () => { st.intro = intro.value; });
     const stdBtn = h('button', { class: 'sec', onclick: () => {
       const hl = (g.highlights && (g.highlights[lang] || g.highlights.en)) || [];
       const cifs = g.versions.map(cifOf).filter((x) => x != null);
       const p = catStore.price();
       const priceLine = priceIn.checked && cifs.length ? (lang === 'es' ? '\nPrecio CIF ' + p.port + ': desde USD ' : '\nPrice CIF ' + p.port + ': from USD ') + money(Math.min(...cifs)) : '';
-      intro.value = (lang === 'es' ? 'Te presento la ' : 'Here is the ') + ((g.title && (g.title[lang] || g.title.en)) || '') + ':\n' +
+      setIntro((lang === 'es' ? 'Te presento la ' : 'Here is the ') + ((g.title && (g.title[lang] || g.title.en)) || '') + ':\n' +
         hl.map((x) => '• ' + x).join('\n') + priceLine + '\n' +
-        (lang === 'es' ? 'Te envío fotos y la ficha técnica completa. ¿Qué versión te interesa?' : "I'm sending you photos and the full spec sheet. Which version are you interested in?");
-      introZh.textContent = ''; introAi = false;
+        (lang === 'es' ? 'Te envío fotos y la ficha técnica completa. ¿Qué versión te interesa?' : "I'm sending you photos and the full spec sheet. Which version are you interested in?"), '', false);
     } }, '标准介绍');
+    const priceRule = () => (priceIn.checked && hasCif ? '可以提 CIF 起价。' : '不要提价格。');
+    const refineBtn = h('button', { class: 'sec', title: '不满意的话，和 AI 对话继续修改；改好点「用这条，返回」' }, '✎ 和 AI 改一改');
+    refineBtn.onclick = () => {
+      if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
+      openRefine({ reply: intro.value.trim(), reply_zh: st.introZh, scene: '车型介绍' }, { language: lang === 'es' ? 'Español' : 'English' }, {
+        title: '修改车型介绍',
+        extra: '- 这是一条介绍「' + g.title.en + '」的消息：参数只能来自【车型资料】，标了「待确认」的不要给数字；' + priceRule(),
+        back: (text, zh) => { if (text && text !== st.intro) setIntro(text, zh, true); openCatalog(); },
+      });
+    };
     const aiBtn = h('button', { class: 'sec' }, 'AI 按客户需求写');
     aiBtn.onclick = async () => {
       if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
@@ -2654,13 +2689,14 @@
         const system = baseContext(conv, chatName) + '\n\n' + [
           '【本次任务：给这位客户写一条介绍「' + g.title.en + '」的 WhatsApp 消息】',
           '- 从【车型资料】里挑 3～4 个和这位客户需求最相关的卖点（比如他关心的用途、对比的品牌、预算、里程或油耗），用他的语言、按这位销售的风格写，不超过 80 个单词，可以分行。',
-          '- 参数只能来自【车型资料】，标了「待确认」的不要给数字。' + (priceIn.checked && hasCif ? '可以提 CIF 起价。' : '不要提价格。'),
+          '- 参数只能来自【车型资料】，标了「待确认」的不要给数字。' + priceRule(),
           '- 结尾说明会发照片和规格书，并问一个推进的问题（比如他更想要哪个版本）。',
           '- 只输出 JSON：{"reply":"客户语言的消息","reply_zh":"中文意思"}',
         ].join('\n');
         const { json } = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: convText(conv, chatName) }], 800);
         if (!json || !json.reply) throw new Error('AI 没有写出介绍，请重试');
-        intro.value = String(json.reply); introZh.textContent = json.reply_zh ? '中文：' + json.reply_zh : ''; introAi = true;
+        if (getChatName() === chatName && panelView === 'cat') setIntro(String(json.reply), String(json.reply_zh || ''), true);
+        else { st.intro = String(json.reply); st.introZh = String(json.reply_zh || ''); st.introAi = true; }
       } catch (e) { toast(e.message, true); } finally { aiBtn.disabled = false; aiBtn.textContent = 'AI 按客户需求写'; }
     };
 
@@ -2670,15 +2706,17 @@
       const u = URL.createObjectURL(m.blob); urls.push(u);
       const im = h('img', { src: u, title: m.name, style: 'width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;cursor:pointer;box-sizing:border-box' });
       const paint = () => { im.style.outline = picked.has(m.id) ? '3px solid #25d366' : '1px solid #d1d7db'; im.style.opacity = picked.has(m.id) ? '1' : '.55'; };
-      im.onclick = () => { if (picked.has(m.id)) picked.delete(m.id); else picked.add(m.id); paint(); refreshSend(); };
+      im.onclick = () => { if (picked.has(m.id)) picked.delete(m.id); else picked.add(m.id); keepPicks(); paint(); refreshSend(); };
       paint(); grid.appendChild(im);
     });
 
     // 规格书
-    const specIn = h('input', { type: 'checkbox' }); specIn.checked = true;
-    const priceIn = h('input', { type: 'checkbox' }); priceIn.checked = hasCif; priceIn.disabled = !hasCif;
+    const specIn = h('input', { type: 'checkbox' }); specIn.checked = st.spec;
+    const priceIn = h('input', { type: 'checkbox' }); priceIn.checked = hasCif && st.price; priceIn.disabled = !hasCif;
+    priceIn.onchange = () => { st.price = priceIn.checked; };
     const langSel = h('select', { class: 'pi-in', style: 'width:auto' }, h('option', { value: 'en' }, 'English'), h('option', { value: 'es' }, 'Español'));
-    langSel.value = lang;
+    langSel.value = st.lang || lang;
+    langSel.onchange = () => { st.lang = langSel.value; };
     const heroUrl = async () => { const m = imgs.find((x) => picked.has(x.id)) || imgs[0]; return m ? blobToDataUrl(m.blob) : ''; };
     const specPage = async () => renderSpecPage(cat, g, langSel.value, priceIn.checked && hasCif, await heroUrl(), piCfg.get());
     const prevBtn = h('button', { class: 'sec' }, '预览规格书');
@@ -2688,7 +2726,8 @@
     const vidBox = h('div');
     vids.forEach((m) => {
       const cb = h('input', { type: 'checkbox' });
-      cb.onchange = () => { if (cb.checked) pickedV.add(m.id); else pickedV.delete(m.id); refreshSend(); };
+      cb.checked = pickedV.has(m.id);
+      cb.onchange = () => { if (cb.checked) pickedV.add(m.id); else pickedV.delete(m.id); keepPicks(); refreshSend(); };
       vidBox.appendChild(h('label', { class: 'ws-inline', style: 'display:flex;gap:6px;align-items:center;margin:3px 0' }, cb, '🎬 ' + m.name + '（' + fmtSize(m.size) + '）'));
     });
 
@@ -2698,7 +2737,7 @@
       sendBtn.textContent = parts.length ? '放进聊天：' + parts.join(' + ') : '请先选择要发的内容';
       sendBtn.disabled = !parts.length;
     };
-    specIn.onchange = refreshSend;
+    specIn.onchange = () => { st.spec = specIn.checked; refreshSend(); };
     sendBtn.onclick = async () => {
       const old = sendBtn.textContent; sendBtn.disabled = true; sendBtn.textContent = '生成中…';
       try {
@@ -2719,8 +2758,8 @@
       tabs,
       h('div', { class: 'wp-sec', style: 'margin-top:4px' }, '① 介绍文字（' + (lang === 'es' ? '西语' : '英语') + '）'),
       intro, introZh,
-      h('div', { class: 'wp-btns' }, stdBtn, aiBtn,
-        h('button', { onclick: () => { if (intro.value.trim()) fillInput(intro.value.trim(), { ai: introAi }); else toast('介绍是空的', true); } }, '填入聊天')),
+      h('div', { class: 'wp-btns', style: 'flex-wrap:wrap' }, stdBtn, aiBtn, refineBtn,
+        h('button', { onclick: () => { if (intro.value.trim()) fillInput(intro.value.trim(), { ai: st.introAi }); else toast('介绍是空的', true); } }, '填入聊天')),
       h('div', { class: 'wp-sec' }, '② 照片（点图片选择 / 取消）'),
       imgs.length ? grid : h('div', { class: 'wp-muted' }, '这个车型还没有照片，去 ⚙ 设置 → 车型资料 添加'),
       h('div', { class: 'wp-sec' }, '③ 规格书 PDF（附一张预览图）'),
@@ -2784,7 +2823,8 @@
       try { all = await mediaDb.all(); } catch (e) { info.textContent = '读取本地媒体库失败：' + e.message; return; }
       info.textContent = cat
         ? '已导入「' + (cat.name || '车型资料') + '」（' + (cat.updated || '') + '）：' + cat.groups.length + ' 个车型、' + cat.groups.reduce((s, g) => s + g.versions.length, 0) + ' 个版本；照片 ' +
-          all.filter((m) => m.kind === 'image').length + ' 张、视频 ' + all.filter((m) => m.kind === 'video').length + ' 个。'
+          all.filter((m) => m.kind === 'image').length + ' 张、视频 ' + all.filter((m) => m.kind === 'video').length + ' 个。' +
+          (cat.logo ? '规格书使用资料包里的 logo。' : (piCfg.get().logo ? '规格书使用 PI 设置里的 logo。' : '没有 logo：在资料包根目录放一个 logo.png 再导入。'))
         : '还没有导入车型资料。点「导入资料包文件夹」，选 D:\\威麟\\WhatsApp资料包。';
       mediaBox.innerHTML = '';
       all.sort((a, b) => a.name.localeCompare(b.name)).forEach((m) => {

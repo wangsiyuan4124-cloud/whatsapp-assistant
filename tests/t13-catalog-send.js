@@ -43,8 +43,21 @@ sys=await p.evaluate(()=>dsLog.at(-1).messages[0].content);
 console.log('5 ai:',await p.inputValue('#wat-panel .wr-draft'),'| zh:',await p.evaluate(()=>document.querySelector('#wat-panel .wp-zh').textContent),'| prompt',sys.includes('介绍「TEST Diesel」')&&sys.includes('可以提 CIF 起价'));
 await p.click('#wat-panel button:has-text("填入聊天")');await p.waitForTimeout(300);
 console.log('5 input:',await p.evaluate(()=>document.querySelector('#main footer div[contenteditable]').innerText));
+// 5b 不满意 → 和 AI 改一改 → 用这条返回：介绍更新，照片选择保留
+await p.click('#wat-panel img[title="02_side.jpg"]');
+await p.click('#wat-panel button:has-text("和 AI 改一改")');await p.waitForTimeout(300);
+console.log('5b refine head:',await head(),'| draft:',await p.inputValue('#wat-panel .wr-draft'),'| back btn:',await p.evaluate(()=>[...document.querySelectorAll('#wat-panel .wp-btns button')].map(b=>b.textContent).find(t=>t.includes('返回'))));
+await p.fill('#wat-panel .wr-ask','更简短，加上可以视频看车');await p.keyboard.press('Enter');await p.waitForTimeout(600);
+sys=await p.evaluate(()=>dsLog.at(-1).messages[0].content);
+console.log('5b refined draft:',await p.inputValue('#wat-panel .wr-draft'),'| extra rule',sys.includes('这是一条介绍「TEST Diesel」的消息')&&sys.includes('可以提 CIF 起价'),'| catalog in prompt',sys.includes('【车型资料'));
+await p.click('#wat-panel .wp-btns button:has-text("用这条，返回")');await p.waitForTimeout(600);
+console.log('5b back:',await head(),'| intro:',await p.inputValue('#wat-panel .wr-draft'),'|',await p.evaluate(()=>document.querySelector('#wat-panel .wp-zh').textContent),'| photos:',await p.evaluate(()=>[...document.querySelectorAll('#wat-panel img')].map(i=>i.title+(i.style.opacity==='1'?'✓':'')).join(' ')));
+await p.click('#wat-panel button:has-text("和 AI 改一改")');await p.waitForTimeout(300);await p.fill('#wat-panel .wr-draft','Manual edit');await p.click('#wat-panel .wp-back');await p.waitForTimeout(600);
+console.log('5b head back keeps manual edit:',await p.inputValue('#wat-panel .wr-draft'));
+await p.click('#wat-panel img[title="02_side.jpg"]');
 // 6 预览规格书
 await p.click('#wat-panel button:has-text("预览规格书")');await p.waitForTimeout(500);
+console.log('6 logo in header:',await p.evaluate(()=>document.querySelectorAll('#wat-pi-modal img[src^="data:image"]').length===2));
 console.log('6 preview:',await p.evaluate(()=>{const m=document.getElementById('wat-pi-modal');const t=m.innerText;return [m.style.display,/SPECIFICATIONS|FICHA TÉCNICA/.test(t),t.includes('TEST Diesel')||t.includes('TEST Diésel'),t.includes('3,900.00')&&t.includes('4,900.00'),(t.match(/●/g)||[]).length,!!m.querySelector('img[src^="data:image"]')].join(' ');}));
 await p.click('#wat-pi-modal button:has-text("关闭")');
 // 7 选视频后放进聊天：照片 + 规格书 JPG/PDF + 视频
