@@ -1,0 +1,12 @@
+# 测试依赖（npm install 会重新安装）
+tests/node_modules/
+tests/package-lock.json
+
+# 测试运行时生成的文件
+tests/app.bundle.js
+tests/out.pdf
+tests/*.png
+
+# 车型资料包含 FOB 价，绝不能提交
+*资料包*/
+R8车型资料.json
