@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.4
+// @version      1.7.5
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -258,6 +258,8 @@
   let dragging = null; // 正在拖动工具栏
   let bypassNextEnter = false;
   let lastTranslated = ''; // 已翻译过的内容，回车时不再重复翻译
+  let lastZh = '';         // lastTranslated 对应的中文原文（学习用）
+  let lastFilled = null;   // 最近一次「填入」的 AI 稿 { text, chat, at }（学习用：对比你改后实际发出的）
 
   async function translateInput(andSend) {
     const el = getInput();
@@ -272,6 +274,7 @@
       if (getInputText(el) !== original) { toast('输入内容已改变，已取消本次翻译', true); return; }
       if (!(await replaceInputText(el, res.text))) { toast('无法写入输入框，请刷新页面后重试', true); return; }
       lastTranslated = getInputText(el);
+      lastZh = original;
       if (andSend) {
         await sleep(120);
         if (!clickSend()) toast('未找到发送按钮，请手动按回车', true);
@@ -309,6 +312,18 @@
       e.preventDefault(); e.stopImmediatePropagation();
       translateInput(true);
     }
+  }, true);
+
+  // 学习用：消息真正发出时（回车没被上面拦下、或点了发送按钮），记下发出的内容
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+    const el = getInput();
+    if (el && el.contains(e.target)) recordSentFromInput();
+  }, true);
+  document.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest && e.target.closest('#main footer button, #main footer [role="button"]');
+    if (!btn) return;
+    if (btn.querySelector('[data-icon*="send"]') || /^(Send|发送|傳送)$/.test(btn.getAttribute('aria-label') || '')) recordSentFromInput();
   }, true);
 
   /* ---------------- 选中对方消息 → 翻译成中文 ---------------- */
@@ -859,21 +874,160 @@
     return out.slice(-(maxMsgs || 60));
   }
 
-  // 公共背景：业务、分级标准、价格与条款、话术库、硬规则
-  function baseContext() {
-    const pb = ai.playbook().filter((p) => !/\[[^\]]*\]/.test(p.text)); // 带方括号备注的话术不交给 AI
+  /* ======================================================================
+   *  学习你的回复方式：自动收集你发出的回复 → 总结风格和偏好 → 写建议时参考
+   *  数据只存在这台电脑的浏览器里（GM_setValue），格式方便以后导出到后端
+   * ==================================================================== */
+  const LEARN_MAX = 800, ASKS_MAX = 200, SEEDS_OFF_AT = 30;
+  const learn = {
+    samples() { return store.get('myReplies', []) || []; },
+    saveSamples(l) { store.set('myReplies', l.slice(-LEARN_MAX)); },
+    asks() { return store.get('refineAsks', []) || []; },
+    profile() { return store.get('styleProfile', null) || { style: '', rules: '', at: 0, n: 0 }; },
+    saveProfile(p) { store.set('styleProfile', p); },
+  };
+  const isMediaText = (t) => /^\[(图片|语音|视频|文件)\]$/.test(t);
+  // 客户在我方这条回复之前说的话（最多合并最近 2 条）
+  function custBefore(conv, idx) {
+    const out = [];
+    for (let i = idx - 1; i >= 0 && out.length < 2; i--) {
+      if (conv[i].from === '我方') { if (out.length) break; continue; }
+      if (!isMediaText(conv[i].text)) out.unshift(conv[i].text);
+    }
+    return out.join(' / ').slice(0, 400);
+  }
+  let lastRecord = { text: '', at: 0 };
+  // 消息发出的那一刻调用：读输入框里即将发出的内容
+  function recordSentFromInput() {
+    try {
+      const el = getInput();
+      const text = el ? getInputText(el) : '';
+      const chat = getChatName();
+      if (!text || !chat || hasChinese(text) || text.length > 1500) return; // 直接发中文的不算（学的是发给客户的外语）
+      if (text === lastRecord.text && Date.now() - lastRecord.at < 3000) return;
+      lastRecord = { text, at: Date.now() };
+      const conv = readConversation(12);
+      const sample = { at: Date.now(), chat, cust: custBefore(conv, conv.length), sent: text, src: 'live' };
+      if (text === lastTranslated && lastZh) sample.zh = lastZh.slice(0, 600);
+      if (lastFilled && lastFilled.chat === chat && Date.now() - lastFilled.at < 3600000) {
+        if (lastFilled.text !== text) sample.ai = lastFilled.text; else sample.aiKept = true;
+      }
+      lastFilled = null;
+      const l = learn.samples(); l.push(sample); learn.saveSamples(l);
+    } catch (e) { /* 学习失败不影响发送 */ }
+  }
+  // 打开聊天时，把页面上已加载的「客户说 → 我方回」补录进来（含手机上发的）
+  function harvestHistory() {
+    const chat = getChatName();
+    if (!chat) return;
+    const conv = readConversation(80);
+    if (!conv.length) return;
+    const l = learn.samples();
+    const have = new Set(l.filter((s) => s.chat === chat).map((s) => s.sent));
+    const fresh = [];
+    conv.forEach((m, i) => {
+      if (m.from !== '我方' || isMediaText(m.text) || hasChinese(m.text) || have.has(m.text)) return;
+      const cust = custBefore(conv, i);
+      if (!cust) return; // 没有上下文的（如开场群发）不收
+      fresh.push({ at: Date.now(), chat, cust, sent: m.text, src: 'history' });
+      have.add(m.text);
+    });
+    if (!fresh.length) return;
+    // 补录的旧消息排在实时记录前面（实时记录更新、更有价值）
+    let at = l.findIndex((s) => s.src === 'live');
+    if (at < 0) at = l.length;
+    l.splice(at, 0, ...fresh);
+    learn.saveSamples(l);
+  }
+  setInterval(() => { try { harvestHistory(); } catch (e) { /* ignore */ } }, 5000);
+  function recordAsk(req) {
+    const l = learn.asks(); l.push({ at: Date.now(), chat: getChatName(), text: String(req).slice(0, 300) });
+    store.set('refineAsks', l.slice(-ASKS_MAX));
+  }
+
+  // 按客户最新的话，找你过去类似情况下的回复（关键词重合度 + 新近程度）
+  const STOP = new Set('the and you for are but not have has had this that with what when where your from can will just its our out all any get how was were been they them then than too very also into about would could should please hello thanks thank there here want need some more like know okay yes'.split(' '));
+  const words = (s) => new Set((String(s).toLowerCase().match(/\p{L}{3,}/gu) || []).filter((w) => !STOP.has(w)));
+  function similarSamples(conv, chatName, n) {
+    const lastCust = conv.filter((m) => m.from === '客户' && !isMediaText(m.text)).slice(-3).map((m) => m.text).join(' ');
+    const q = words(lastCust);
+    const pool = learn.samples().filter((s) => s.chat !== chatName && s.cust && s.sent);
+    const scored = pool.map((s, i) => {
+      const w = words(s.cust);
+      let hit = 0; q.forEach((x) => { if (w.has(x)) hit++; });
+      return { s, score: (hit ? hit / Math.sqrt(w.size + 1) : 0) + i / (pool.length * 20) };
+    }).sort((a, b) => b.score - a.score);
+    return scored.slice(0, n).map((x) => x.s);
+  }
+  // 交给 AI 的「你的风格」部分
+  function styleContext(conv, chatName) {
+    const p = learn.profile();
+    const parts = [];
+    if (p.style.trim()) parts.push('【这位销售本人的回复风格（照这个风格写）】\n' + p.style.trim());
+    if (p.rules.trim()) parts.push('【这位销售的长期偏好（必须遵守）】\n' + p.rules.trim().split('\n').filter((x) => x.trim()).map((x) => '- ' + x.replace(/^[-•\s]+/, '')).join('\n'));
+    if (conv) {
+      const ex = similarSamples(conv, chatName, 6);
+      if (ex.length) parts.push('【这位销售过去在类似情况下的真实回复（学他的语气、长度和推进方式；不要照抄里面的数字和具体条件）】\n' +
+        ex.map((s) => '客户：' + s.cust.slice(0, 200) + '\n销售：' + s.sent.slice(0, 400)).join('\n---\n'));
+    }
+    const edits = learn.samples().filter((s) => s.ai).slice(-3);
+    if (edits.length) parts.push('【AI 写的稿子被销售改过的例子（想想他为什么这样改，避免再犯）】\n' +
+      edits.map((s) => 'AI 原稿：' + s.ai.slice(0, 300) + '\n销售改成：' + s.sent.slice(0, 300)).join('\n---\n'));
+    return parts.join('\n\n');
+  }
+
+  // 「学习我的风格」：把收集到的回复和修改要求交给 AI，总结风格说明和偏好规则
+  async function learnStyle() {
+    const all = learn.samples();
+    if (all.length < 10) throw new Error('收集到的回复还太少（' + all.length + ' 条），多聊几天或打开几个聊过的客户再来');
+    const edits = all.filter((s) => s.ai).slice(-20);
+    const plain = all.filter((s) => !s.ai).slice(-60);
+    const asks = learn.asks().slice(-40);
+    const old = learn.profile();
+    const system = [
+      '你在帮一位中国汽车出口销售总结他在 WhatsApp 上回复客户的个人风格，以后 AI 写回复建议时要模仿他。',
+      '根据下面他真实发出的回复、他对 AI 稿子的修改、他提过的修改要求，总结：',
+      '1. style：他的回复风格，中文，5～10 条要点。包括句子长短、语气、开头和结尾习惯、是否用表情、怎么提问和推进成交、常用说法（可以引用他的原句片段）。',
+      '2. rules：他明确的偏好或禁忌，中文，每条一句，比如「不要用 I understand 开头」。只写有多次证据的，不要把针对某个客户的一次性要求写成规则。',
+      '原来已有的总结仅供参考，以新证据为准，可以修改或删除。',
+      '只输出 JSON：{"style":"多行文字，每行一条","rules":["规则1","规则2"]}',
+    ].join('\n');
+    const user = [
+      old.style || old.rules ? '【原来的总结】\n' + old.style + '\n规则：\n' + old.rules : '',
+      '【他真实发出的回复（客户说 → 他回）】\n' + plain.map((s) => '客户：' + s.cust.slice(0, 150) + '\n他：' + s.sent.slice(0, 300)).join('\n---\n'),
+      edits.length ? '【他对 AI 稿子的修改】\n' + edits.map((s) => 'AI：' + s.ai.slice(0, 250) + '\n他改成：' + s.sent.slice(0, 250)).join('\n---\n') : '',
+      asks.length ? '【他在「和 AI 改一改」里提过的要求】\n' + asks.map((a) => '- ' + a.text).join('\n') : '',
+    ].filter(Boolean).join('\n\n');
+    const { json } = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: user }], 1500, { timeout: 90000 });
+    const style = String((json && json.style) || '').trim();
+    const rules = Array.isArray(json && json.rules) ? json.rules.map(String).filter((x) => x.trim()).join('\n') : String((json && json.rules) || '');
+    if (!style) throw new Error('AI 没有给出总结，请重试');
+    const p = { style, rules, at: Date.now(), n: all.length };
+    learn.saveProfile(p);
+    return p;
+  }
+
+  // 公共背景：业务、分级标准、价格与条款、你的风格、话术库、硬规则
+  // conv / chatName：传了就附上你在类似情况下的真实回复
+  function baseContext(conv, chatName) {
+    const realCount = learn.samples().length;
+    // 你的真实回复攒够了，通用种子话术就不再交给 AI（你自己收藏的照样保留）
+    const pb = ai.playbook().filter((p) => !/\[[^\]]*\]/.test(p.text) && !(p.seed && realCount >= SEEDS_OFF_AT)); // 带方括号备注的话术不交给 AI
     const pbSorted = pb.slice().sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 40);
     const prices = ai.prices.trim();
+    const sc = styleContext(conv, chatName);
     return [
       '你是一名资深的外贸汽车销售顾问，帮助中国经销商处理 WhatsApp 客户。',
       '【我方业务】\n' + ai.biz,
       '【客户分级标准】\n' + ai.rules,
       '【价格表与交易条款】\n' + (prices || '（暂无。）'),
-      '【话术库（参考风格和推进思路，可改写）】\n' + pbSorted.map((p) => '- [' + p.scene + '] ' + p.text).join('\n'),
+      sc,
+      pbSorted.length ? '【话术库（参考推进思路，可改写）】\n' + pbSorted.map((p) => '- [' + p.scene + '] ' + p.text).join('\n') : '',
       '【硬规则】',
       '- 价格、优惠、付款方式、定金比例、交期、船期、库存、质保等具体条件，只能来自上面的【我方业务】和【价格表与交易条款】，或者聊天记录里我方已经说过的内容。没有依据的一律不要写，改为向客户提问或说明会尽快确认。',
       '- 回复用客户使用的语言，像 WhatsApp 聊天一样简短自然。',
-    ].join('\n\n');
+      '- 回复要像这位销售本人写的：长度、语气、用词贴近他的真实回复。不要用 "I understand!"、"Great question!"、"Thanks for reaching out" 这类客服腔开头，除非他自己常这样写。',
+    ].filter(Boolean).join('\n\n');
   }
   function convText(conv, chatName) {
     return '客户：' + (chatName || '未知') + '\n聊天记录（按时间顺序）：\n' +
@@ -881,7 +1035,7 @@
   }
 
   function buildPrompt(conv, chatName) {
-    const system = baseContext() + '\n\n' + [
+    const system = baseContext(conv, chatName) + '\n\n' + [
       '【本次任务：分析客户并给出回复建议】',
       '1. 只根据聊天内容判断，没提到的信息填"未知"，不要猜。',
       '2. 只给 1 条你认为此刻最合适的建议回复（不超过 60 个单词），要推进一个具体目标：补齐缺失信息、消除顾虑或推进成交。如果最后一条是我方发的、客户还没回，就给跟进话术。',
@@ -1125,10 +1279,15 @@
   }
   const fmtTime = (ts) => new Date(ts).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-  async function fillInput(text) {
+  // opts.ai：填入的是 AI 写的稿子，发出时和实际发出的内容对比，用来学习
+  async function fillInput(text, opts) {
     const el = getInput();
     if (!el) { toast('请先打开聊天', true); return; }
-    if (await replaceInputText(el, String(text))) { lastTranslated = getInputText(el); el.focus(); toast('已填入输入框，检查后按回车发送'); }
+    if (await replaceInputText(el, String(text))) {
+      lastTranslated = getInputText(el); lastZh = '';
+      if (opts && opts.ai) lastFilled = { text: lastTranslated, chat: getChatName(), at: Date.now() };
+      el.focus(); toast('已填入输入框，检查后按回车发送');
+    }
     else toast('填入失败，请手动复制', true);
   }
   function savePb(text, zh, scene, level, btn) {
@@ -1167,7 +1326,7 @@
         h('div', { class: 'wp-reply' }, String(s.reply)),
         s.reply_zh ? h('div', { class: 'wp-zh' }, '中文：' + s.reply_zh) : null,
         h('div', { class: 'wp-btns' },
-          h('button', { onclick: () => fillInput(s.reply) }, '填入'),
+          h('button', { onclick: () => fillInput(s.reply, { ai: true }) }, '填入'),
           h('button', { class: 'sec', onclick: () => openRefine(s, r) }, '✎ 和 AI 改一改'),
           altBtn, saveBtn)));
     });
@@ -1183,6 +1342,11 @@
       h('button', { class: 'sec', onclick: saveMyLastMessage }, '☆ 收藏我发的最后一条'),
       h('button', { class: 'sec', onclick: () => analyzeCurrent(true) }, '重新分析')));
     if (at) box.appendChild(h('div', { class: 'wp-muted', style: 'margin-top:6px' }, '分析时间：' + new Date(at).toLocaleString()));
+    const newSamples = learn.samples().length - (learn.profile().n || 0);
+    if (newSamples >= 30) {
+      box.appendChild(h('div', { class: 'wp-muted', style: 'margin-top:6px' }, '又收集了 ' + newSamples + ' 条你的回复，可以让 AI 重新学习你的风格 ',
+        h('button', { class: 'sec', onclick: () => openSettings('learn') }, '去学习')));
+    }
     return box;
   }
 
@@ -1192,7 +1356,7 @@
     const chatName = getChatName();
     const conv = readConversation(40);
     const lang = (result && result.language) || '客户使用的语言';
-    const system = baseContext() + '\n\n' + [
+    const system = baseContext(conv, chatName) + '\n\n' + [
       '【本次任务：和销售一起修改一条准备发给客户的 WhatsApp 回复】',
       '- 销售会给出当前草稿（可能为空）和中文修改要求，你按要求改写。草稿里销售手动改过的内容要保留，除非要求里说要改。',
       '- 回复语言：' + lang + '。简短自然，像真人聊天。',
@@ -1216,6 +1380,7 @@
       if (!req) { ask.focus(); return; }
       if (!ai.apiKey) { toast('请先在 ⚙ 设置里填写 DeepSeek API Key', true); return; }
       ask.value = '';
+      recordAsk(req); // 学习用：你的修改要求
       thread.appendChild(h('div', { class: 'wr-me' }, req));
       const wait = h('div', { class: 'wr-ai wp-muted' }, 'AI 正在修改…');
       thread.appendChild(wait);
@@ -1254,7 +1419,7 @@
       h('div', { class: 'wp-sec', style: 'margin-top:0' }, '草稿（可以直接手改）'),
       draft, zhLine,
       h('div', { class: 'wp-btns' },
-        h('button', { onclick: () => { if (draft.value.trim()) fillInput(draft.value.trim()); else toast('草稿是空的', true); } }, '填入聊天'),
+        h('button', { onclick: () => { if (draft.value.trim()) fillInput(draft.value.trim(), { ai: true }); else toast('草稿是空的', true); } }, '填入聊天'),
         saveBtn,
         h('button', { class: 'sec', onclick: backToResult }, '← 返回分析')),
       h('div', { class: 'wp-sec' }, '和 AI 对话修改'),
@@ -1466,7 +1631,7 @@
           h('div', { class: 'wp-goal' }, '可以发给客户：'),
           h('div', { class: 'wp-reply' }, m.reply),
           m.reply_zh ? h('div', { class: 'wp-zh' }, '中文：' + m.reply_zh) : null,
-          h('div', { class: 'wp-btns' }, h('button', { onclick: () => fillInput(m.reply) }, '填入聊天'), saveBtn)));
+          h('div', { class: 'wp-btns' }, h('button', { onclick: () => fillInput(m.reply, { ai: true }) }, '填入聊天'), saveBtn)));
       }
       thread.appendChild(b);
     };
@@ -1628,6 +1793,7 @@
     glossIn.value = store.get('glossary', '');
     const aiInIn = h('input', { type: 'checkbox' }); aiInIn.checked = store.get('aiIn', true);
     const piSec = piSettingsSection();
+    const learnSec = learnSettingsSection();
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
       pbBox.innerHTML = '';
@@ -1650,18 +1816,19 @@
         h('label', { class: 'ws-inline' }, labelIn, ' 分析后自动加入 WhatsApp 的 A/B/C/D 列表')),
       pi: piSec,
       pb: h('div', null, h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox),
+      learn: learnSec,
     };
     const tabBtns = {};
     const showTab = (k) => {
       Object.keys(pages).forEach((x) => { pages[x].style.display = x === k ? '' : 'none'; tabBtns[x].classList.toggle('on', x === k); });
     };
-    [['basic', '基本设置'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库']].forEach(([k, t]) => {
+    [['basic', '基本设置'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库'], ['learn', 'AI 学到的']].forEach(([k, t]) => {
       tabBtns[k] = h('button', { class: 'ws-tab', onclick: () => showTab(k) }, t);
     });
     setDlg.appendChild(h('div', { class: 'ws-card' },
       h('div', { class: 'wp-head' }, h('b', null, '翻译助手设置'), h('button', { class: 'wp-x', onclick: () => { setDlg.style.display = 'none'; } }, '×')),
       h('div', { class: 'ws-tabs' }, Object.values(tabBtns)),
-      pages.basic, pages.pi, pages.pb,
+      pages.basic, pages.pi, pages.pb, pages.learn,
       h('div', { class: 'wp-btns ws-save', style: 'justify-content:flex-end;margin-top:10px' },
         h('button', { class: 'sec', onclick: () => {
           const data = JSON.stringify(ai.playbook(), null, 2);
@@ -1677,12 +1844,73 @@
           store.set('aiIn', aiInIn.checked);
           scanIncoming();
           piSec.save();
+          learnSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');
           if (panelView === 'pi' && getChatName()) openPI(false); // 刷新 PI 表单上方的提醒
         } }, '保存'))));
     showTab(pages[tab] ? tab : 'basic');
     setDlg.style.display = 'flex';
+  }
+
+  /* ---------- 设置 → AI 学到的 ---------- */
+  function learnSettingsSection() {
+    const p = learn.profile();
+    const styleIn = h('textarea', { rows: '7', placeholder: '还没有总结。收集到一些回复后点上面的「学习我的风格」，也可以自己写，比如：\n回复很短，一般一两句\n很少用表情\n喜欢直接问客户要不要视频看车' });
+    styleIn.value = p.style;
+    const rulesIn = h('textarea', { rows: '5', placeholder: '每行一条，比如：\n不要用 I understand 开头\n不要问客户预算' });
+    rulesIn.value = p.rules;
+    const info = h('div', { class: 'wp-muted' });
+    const list = h('div', { class: 'ws-pb' });
+    const render = () => {
+      const all = learn.samples();
+      const prof = learn.profile();
+      info.textContent = '已收集你的回复 ' + all.length + ' 条（其中 ' + all.filter((s) => s.ai).length + ' 条是你改过的 AI 稿），修改要求 ' + learn.asks().length + ' 条。' +
+        (prof.at ? '上次学习：' + fmtTime(prof.at) + '（当时 ' + prof.n + ' 条）。' : '还没学习过。') +
+        (all.length >= SEEDS_OFF_AT ? '已够 ' + SEEDS_OFF_AT + ' 条，通用模板话术不再交给 AI。' : '');
+      list.innerHTML = '';
+      all.slice(-40).reverse().forEach((s) => {
+        list.appendChild(h('div', { class: 'ws-pbi' },
+          h('span', { class: 'wp-tag' }, s.ai ? '改过 AI' : s.src === 'history' ? '历史' : '发出'),
+          h('span', { class: 'ws-pbt' },
+            h('div', { class: 'wp-muted' }, (s.chat || '') + ' · 客户：' + (s.cust || '').slice(0, 80)),
+            s.ai ? h('div', { class: 'wp-muted' }, 'AI 原稿：' + s.ai.slice(0, 120)) : null,
+            h('div', null, '你：' + s.sent)),
+          h('button', { class: 'sec', title: '删除这条（不让 AI 学它）', onclick: () => { learn.saveSamples(learn.samples().filter((x) => !(x.at === s.at && x.sent === s.sent))); render(); } }, '删')));
+      });
+      if (!all.length) list.appendChild(h('div', { class: 'wp-muted', style: 'padding:8px' }, '还没有收集到。你照常发消息、或打开聊过的客户往上翻一翻，就会自动收集。'));
+    };
+    render();
+    const learnBtn = h('button', null, '学习我的风格');
+    learnBtn.onclick = async () => {
+      if (!ai.apiKey) { toast('请先在「基本设置」里填写 DeepSeek API Key', true); return; }
+      learnBtn.disabled = true; learnBtn.textContent = '学习中…（约 20 秒）';
+      try {
+        const np = await learnStyle();
+        styleIn.value = np.style; rulesIn.value = np.rules;
+        render();
+        toast('学习完成，下面的总结可以直接修改，改完点「保存」');
+      } catch (e) { toast(e.message, true); } finally { learnBtn.disabled = false; learnBtn.textContent = '学习我的风格'; }
+    };
+    const sec = h('div', null,
+      h('div', { class: 'wp-muted', style: 'margin-top:8px' }, '插件会自动记下你发出的回复（包括你改过的 AI 稿和在「和 AI 改一改」里提的要求），写建议回复时照着你的风格写。数据只存在这台电脑的浏览器里。'),
+      h('div', { class: 'wp-btns', style: 'margin-top:8px' }, learnBtn,
+        h('button', { class: 'sec', onclick: () => {
+          const data = JSON.stringify({ version: 1, myReplies: learn.samples(), refineAsks: learn.asks(), styleProfile: learn.profile() }, null, 2);
+          navigator.clipboard.writeText(data).then(() => toast('学习数据已复制到剪贴板，可粘贴到记事本保存'), () => toast('复制失败', true));
+        } }, '导出学习数据'),
+        h('button', { class: 'sec', onclick: () => {
+          if (confirmInline(null, '将清空收集到的全部回复和修改要求（风格总结保留）')) { learn.saveSamples([]); store.set('refineAsks', []); render(); }
+        } }, '清空收集的回复')),
+      info,
+      h('label', null, '你的回复风格（AI 写建议时照这个写）'), styleIn,
+      h('label', null, '长期偏好（每行一条，AI 必须遵守）'), rulesIn,
+      h('label', null, '最近收集的回复（不想让 AI 学的可以删掉）'), list);
+    sec.save = () => {
+      const cur = learn.profile();
+      learn.saveProfile(Object.assign({}, cur, { style: styleIn.value.trim(), rules: rulesIn.value.trim() }));
+    };
+    return sec;
   }
 
   /* ======================================================================
