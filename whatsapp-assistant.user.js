@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.8
+// @version      1.7.9
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -948,10 +948,11 @@
   // 按客户最新的话，找你过去类似情况下的回复（关键词重合度 + 新近程度）
   const STOP = new Set('the and you for are but not have has had this that with what when where your from can will just its our out all any get how was were been they them then than too very also into about would could should please hello thanks thank there here want need some more like know okay yes'.split(' '));
   const words = (s) => new Set((String(s).toLowerCase().match(/\p{L}{3,}/gu) || []).filter((w) => !STOP.has(w)));
-  function similarSamples(conv, chatName, n) {
+  // only：只在这些样本里找（比如只找原样采用的 AI 回复）；不传就排除当前聊天，在全部样本里找
+  function similarSamples(conv, chatName, n, only) {
     const lastCust = conv.filter((m) => m.from === '客户' && !isMediaText(m.text)).slice(-3).map((m) => m.text).join(' ');
     const q = words(lastCust);
-    const pool = learn.samples().filter((s) => s.chat !== chatName && s.cust && s.sent);
+    const pool = learn.samples().filter((s) => s.cust && s.sent && (only ? only(s) : s.chat !== chatName));
     const scored = pool.map((s, i) => {
       const w = words(s.cust);
       let hit = 0; q.forEach((x) => { if (w.has(x)) hit++; });
@@ -966,9 +967,14 @@
     if (p.style.trim()) parts.push('【这位销售本人的回复风格（照这个风格写）】\n' + p.style.trim());
     if (p.rules.trim()) parts.push('【这位销售的长期偏好（必须遵守）】\n' + p.rules.trim().split('\n').filter((x) => x.trim()).map((x) => '- ' + x.replace(/^[-•\s]+/, '')).join('\n'));
     if (conv) {
-      const ex = similarSamples(conv, chatName, 6);
+      // 正面例子：AI 写的、销售一个字没改就发出去的回复（说明这样写是对的）
+      const kept = similarSamples(conv, chatName, 3, (s) => s.aiKept);
+      const keptSet = new Set(kept);
+      const ex = similarSamples(conv, chatName, 6).filter((s) => !keptSet.has(s));
       if (ex.length) parts.push('【这位销售过去在类似情况下的真实回复（学他的语气、长度和推进方式；不要照抄里面的数字和具体条件）】\n' +
         ex.map((s) => '客户：' + s.cust.slice(0, 200) + '\n销售：' + s.sent.slice(0, 400)).join('\n---\n'));
+      if (kept.length) parts.push('【AI 写的、销售原样采用发出的回复（说明这种写法他满意，保持这种长度、语气和推进方式）】\n' +
+        kept.map((s) => '客户：' + s.cust.slice(0, 200) + '\n采用的回复：' + s.sent.slice(0, 400)).join('\n---\n'));
     }
     const edits = learn.samples().filter((s) => s.ai).slice(-3);
     if (edits.length) parts.push('【AI 写的稿子被销售改过的例子（想想他为什么这样改，避免再犯）】\n' +
@@ -981,12 +987,13 @@
     const all = learn.samples();
     if (all.length < 10) throw new Error('收集到的回复还太少（' + all.length + ' 条），多聊几天或打开几个聊过的客户再来');
     const edits = all.filter((s) => s.ai).slice(-20);
-    const plain = all.filter((s) => !s.ai).slice(-60);
+    const kept = all.filter((s) => s.aiKept).slice(-20);
+    const plain = all.filter((s) => !s.ai && !s.aiKept).slice(-60);
     const asks = learn.asks().slice(-40);
     const old = learn.profile();
     const system = [
       '你在帮一位中国汽车出口销售总结他在 WhatsApp 上回复客户的个人风格，以后 AI 写回复建议时要模仿他。',
-      '根据下面他真实发出的回复、他对 AI 稿子的修改、他提过的修改要求，总结：',
+      '根据下面他真实发出的回复、他对 AI 稿子的修改（说明他不满意的地方）、他原样采用的 AI 稿（说明他满意的写法）、他提过的修改要求，总结：',
       '1. style：他的回复风格，中文，5～10 条要点。包括句子长短、语气、开头和结尾习惯、是否用表情、怎么提问和推进成交、常用说法（可以引用他的原句片段）。',
       '2. rules：他明确的偏好或禁忌，中文，每条一句，比如「不要用 I understand 开头」。只写有多次证据的，不要把针对某个客户的一次性要求写成规则。',
       '原来已有的总结仅供参考，以新证据为准，可以修改或删除。',
@@ -996,6 +1003,7 @@
       old.style || old.rules ? '【原来的总结】\n' + old.style + '\n规则：\n' + old.rules : '',
       '【他真实发出的回复（客户说 → 他回）】\n' + plain.map((s) => '客户：' + s.cust.slice(0, 150) + '\n他：' + s.sent.slice(0, 300)).join('\n---\n'),
       edits.length ? '【他对 AI 稿子的修改】\n' + edits.map((s) => 'AI：' + s.ai.slice(0, 250) + '\n他改成：' + s.sent.slice(0, 250)).join('\n---\n') : '',
+      kept.length ? '【他直接采用、一个字没改就发出去的 AI 稿】\n' + kept.map((s) => '客户：' + s.cust.slice(0, 150) + '\n采用：' + s.sent.slice(0, 300)).join('\n---\n') : '',
       asks.length ? '【他在「和 AI 改一改」里提过的要求】\n' + asks.map((a) => '- ' + a.text).join('\n') : '',
     ].filter(Boolean).join('\n\n');
     const { json } = await callDeepSeek([{ role: 'system', content: system }, { role: 'user', content: user }], 1500, { timeout: 90000 });
@@ -1876,17 +1884,24 @@
     const rulesIn = h('textarea', { rows: '5', placeholder: '每行一条，比如：\n不要用 I understand 开头\n不要问客户预算' });
     rulesIn.value = p.rules;
     const info = h('div', { class: 'wp-muted' });
+    const rateEl = h('div', { style: 'margin-top:4px;font-size:12px;color:#0b6b3a' });
     const list = h('div', { class: 'ws-pb' });
     const render = () => {
       const all = learn.samples();
       const prof = learn.profile();
-      info.textContent = '已收集你的回复 ' + all.length + ' 条（其中 ' + all.filter((s) => s.ai).length + ' 条是你改过的 AI 稿），修改要求 ' + learn.asks().length + ' 条。' +
+      info.textContent = '已收集你的回复 ' + all.length + ' 条（其中原样采用的 AI 稿 ' + all.filter((s) => s.aiKept).length + ' 条、改过的 AI 稿 ' + all.filter((s) => s.ai).length + ' 条），修改要求 ' + learn.asks().length + ' 条。' +
         (prof.at ? '上次学习：' + fmtTime(prof.at) + '（当时 ' + prof.n + ' 条）。' : '还没学习过。') +
         (all.length >= SEEDS_OFF_AT ? '已够 ' + SEEDS_OFF_AT + ' 条，通用模板话术不再交给 AI。' : '');
+      // 采用率：填入的 AI 稿里，一个字没改就发出去的比例（全部 / 最近 20 次）
+      const used = all.filter((s) => s.ai || s.aiKept);
+      const rate = (l) => (l.length ? Math.round(l.filter((s) => s.aiKept).length * 100 / l.length) + '%（' + l.filter((s) => s.aiKept).length + '/' + l.length + '）' : '—');
+      rateEl.textContent = used.length
+        ? 'AI 稿原样采用率：全部 ' + rate(used) + '，最近 20 次 ' + rate(used.slice(-20)) + '。越高说明 AI 越懂你的写法。'
+        : 'AI 稿原样采用率：还没有数据（点「填入」AI 写的回复并发出后开始统计）。';
       list.innerHTML = '';
       all.slice(-40).reverse().forEach((s) => {
         list.appendChild(h('div', { class: 'ws-pbi' },
-          h('span', { class: 'wp-tag' }, s.ai ? '改过 AI' : s.src === 'history' ? '历史' : '发出'),
+          h('span', { class: 'wp-tag' }, s.ai ? '改过 AI' : s.aiKept ? '采用 AI' : s.src === 'history' ? '历史' : '发出'),
           h('span', { class: 'ws-pbt' },
             h('div', { class: 'wp-muted' }, (s.chat || '') + ' · 客户：' + (s.cust || '').slice(0, 80)),
             s.ai ? h('div', { class: 'wp-muted' }, 'AI 原稿：' + s.ai.slice(0, 120)) : null,
@@ -1917,7 +1932,7 @@
         h('button', { class: 'sec', onclick: () => {
           if (confirmInline(null, '将清空收集到的全部回复和修改要求（风格总结保留）')) { learn.saveSamples([]); store.set('refineAsks', []); render(); }
         } }, '清空收集的回复')),
-      info,
+      info, rateEl,
       h('label', null, '你的回复风格（AI 写建议时照这个写）'), styleIn,
       h('label', null, '长期偏好（每行一条，AI 必须遵守）'), rulesIn,
       h('label', null, '最近收集的回复（不想让 AI 学的可以删掉）'), list);

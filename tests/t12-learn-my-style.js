@@ -47,13 +47,15 @@ s=await last();console.log('7 kept:',s.aiKept===true,'| ai field',s.ai||'-');
 await p.click('#wat-panel button:has-text("和 AI 改一改")');await p.waitForTimeout(200);
 await p.fill('.wr-ask','不要用 I understand 开头');await p.keyboard.press('Enter');await p.waitForTimeout(500);
 sys=await p.evaluate(()=>dsLog.filter(q=>q.messages[0].content.includes('修改一条')).at(-1).messages[0].content);
-console.log('8 asks:',JSON.stringify((await p.evaluate(()=>GM_getValue('refineAsks'))).map(a=>a.text)),'| edit example in prompt',sys.includes('销售改成：¿Qué versión prefiere y en qué ciudad está? Thanks!'));
+console.log('8 asks:',JSON.stringify((await p.evaluate(()=>GM_getValue('refineAsks'))).map(a=>a.text)),'| edit example in prompt',sys.includes('销售改成：¿Qué versión prefiere y en qué ciudad está? Thanks!'),
+  '| kept example in prompt',sys.includes('【AI 写的、销售原样采用发出的回复')&&sys.includes('采用的回复：¿Qué versión prefiere y en qué ciudad está?\n'));
 // 9 设置 → AI 学到的 → 学习我的风格
 await p.click('#wat-set');await p.click('#wat-settings .ws-tab:has-text("AI 学到的")');await p.waitForTimeout(100);
 console.log('9 info:',await p.evaluate(()=>[...document.querySelectorAll('#wat-settings .wp-muted')].map(x=>x.textContent).find(t=>t.startsWith('已收集'))));
+console.log('9 rate:',await p.evaluate(()=>[...document.querySelectorAll('#wat-settings div')].map(x=>x.textContent).find(t=>t.startsWith('AI 稿原样采用率'))),'| tags:',await p.evaluate(()=>[...document.querySelectorAll('#wat-settings button[title^="删除这条"]')].slice(0,4).map(b=>b.parentElement.querySelector('.wp-tag').textContent).join(',')));
 await p.click('#wat-settings button:has-text("学习我的风格")');await p.waitForTimeout(800);
 const lq=await p.evaluate(()=>dsLog.filter(q=>q.messages[0].content.includes('个人风格')).at(-1).messages[1].content);
-console.log('9 learn prompt has edits',lq.includes('他改成：'),'| asks',lq.includes('不要用 I understand 开头'),'| samples',lq.includes('他：See you'));
+console.log('9 learn prompt has edits',lq.includes('他改成：'),'| asks',lq.includes('不要用 I understand 开头'),'| samples',lq.includes('他：See you'),'| kept section',lq.includes('【他直接采用、一个字没改就发出去的 AI 稿】')&&lq.includes('采用：¿Qué versión'));
 const tas=p.locator('#wat-settings textarea');const n=await tas.count();
 console.log('9 style box:',JSON.stringify(await tas.nth(n-2).inputValue()),'| rules box:',JSON.stringify(await tas.nth(n-1).inputValue()));
 await tas.nth(n-1).fill('不要用 I understand 开头\n回复不超过两句');
