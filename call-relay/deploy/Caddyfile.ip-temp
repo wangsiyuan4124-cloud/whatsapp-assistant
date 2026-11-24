@@ -1,0 +1,38 @@
+# 还没有备案域名时的临时配置。
+# 把下面三处 203.0.113.10 换成这台轻量服务器的公网 IPv4。
+# 203.0.113.10 是文档用的假地址，不改的话证书和网站都不会对上你的机器。
+#
+# 需要 Caddy 2.11.4 或更新。更旧的版本会拒绝给公网 IP 签发证书
+# （日志里常见 cannot have public IP certificate），或者 IPv6 处理有问题。
+# 本文件只考虑 IPv4。
+#
+# Let's Encrypt 给 IP 的证书必须用 shortlived，有效期 160 小时（大约 6 天多），
+# Caddy 会在证书还有效时自动续期。续期仍然要能从公网访问这台机器的 80 端口。
+#
+# 官方允许的验证方式只有 http-01（公网 80）和 tls-alpn-01（公网 443）。
+# 不能用 DNS-01 证明你控制一个 IP。
+# 这里关掉 tls-alpn，只走 http-01，所以签发不依赖 443。
+# 8443 只是插件访问业务的端口，Let's Encrypt 不会来这个端口做验证。
+
+{
+	email admin@example.com
+	http_port 80
+}
+
+http://203.0.113.10 {
+	# 只给 HTTP-01 留着。Caddy 会自己接 /.well-known/acme-challenge/ 。
+	# 不要把中转反代到 80，避免没加密的端口直接露出 /session。
+	respond "ok" 200
+}
+
+203.0.113.10:8443 {
+	tls {
+		issuer acme {
+			profile shortlived
+			disable_tlsalpn
+		}
+	}
+	# Caddy 2 的 reverse_proxy 会处理 WebSocket 的 Upgrade，
+	# /session 走普通 HTTP，/aliyun 走 WebSocket，不用再写一条。
+	reverse_proxy 127.0.0.1:8787
+}

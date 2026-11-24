@@ -1,0 +1,12 @@
+# 域名已经备案、解析到这台服务器之后用。
+# 把 call.example.com 换成你的域名。
+# 证书是普通的自动 HTTPS（目前大约 90 天，Let's Encrypt 以后会缩短），不是 IP 那种 6 天证书。
+# 插件里的中转地址改成 https://call.example.com/session ，中转密钥不用改。
+
+{
+	email admin@example.com
+}
+
+call.example.com {
+	reverse_proxy 127.0.0.1:8787
+}

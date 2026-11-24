@@ -1,0 +1,23 @@
+[Unit]
+Description=WhatsApp 通话同传中转（call-relay）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=callrelay
+Group=callrelay
+WorkingDirectory=/opt/call-relay
+EnvironmentFile=/etc/call-relay.env
+# server.js 只读取 PORT，没有「只听 127.0.0.1」的环境变量。
+# 不改 server.js 的前提下，进程会听 0.0.0.0:8787（双栈机器上通常是 ::）。
+# 本机 Caddy 用 127.0.0.1:8787 仍能连上。
+# 腾讯云轻量防火墙不要放行 8787，否则中转会直接暴露在公网。
+Environment=PORT=8787
+ExecStart=/usr/local/bin/node server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
