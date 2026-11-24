@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.8.0**，一个文件，约 4200 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
+当前版本：**v1.8.1**，一个文件，约 4500 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
 
 ## 2. 功能清单
 
@@ -45,7 +45,7 @@
 
 ### 存储（GM_setValue，只存在用户这台电脑的 Chrome 里）
 
-`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`myReplies`（你的回复样本，最多 800 条：`{at, chat, cust, zh?, sent, ai?, aiKept?, src: live|history}`）、`refineAsks`（修改要求，最多 200 条）、`styleProfile`（`{style, rules, at, n}`）、`catalog`（车型资料包，含 FOB）、`catPrice`（`{port, freight, insurance, override}`）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`、`callOn`（通话同传，默认关）、`callRelay` / `callRelayKey` / `callApiKey`、`callOutProvider` / `callInProvider`、`callSilenceMs`、`callDuck`（0–100）、`callShowOrig`、`callTerms`、`callLangMode`（`auto` / `en` / `es` / `fr`）。
+`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`myReplies`（你的回复样本，最多 800 条：`{at, chat, cust, zh?, sent, ai?, aiKept?, src: live|history}`）、`refineAsks`（修改要求，最多 200 条）、`styleProfile`（`{style, rules, at, n}`）、`catalog`（车型资料包，含 FOB）、`catPrice`（`{port, freight, insurance, override}`）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`、`callOn`（通话同传，默认关）、`callRelay` / `callRelayKey` / `callApiKey`、`callOutProvider` / `callInProvider`、`callSilenceMs`、`callDuck`（0–100）、`callShowOrig`、`callTerms`、`callLangMode`（`auto` / `en` / `es` / `fr`）、`callAudioMode`（`headphone` / `speaker`）、`callRemoteRms`、`callLocalRms`、`callSpeakerHangMs`。通话引擎在 `CALL_PROVIDERS`，用 `registerCallProvider` 追加；国内同声传译还没接。
 
 **仓库是公开的**：代码里绝不能放 API Key、银行信息、公章或 Logo 图片。
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.8.0
+// @version      1.8.1
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -86,8 +86,11 @@
       if (typeof origGum === 'function') {
         const bound = origGum.bind(md);
         api.rawGetUserMedia = bound;
-        const wrapped = function () {
-          return Promise.resolve(bound.apply(md, arguments)).then((stream) => {
+        const wrapped = function (constraints) {
+          let next = constraints;
+          try { next = speakerMicConstraints(constraints); } catch (err) { next = constraints; }
+          const args = next === constraints ? arguments : [next];
+          return Promise.resolve(bound.apply(md, args)).then((stream) => {
             try { if (api.onMic) api.onMic(stream); } catch (err) { /* ignore */ }
             return stream;
           });
@@ -3021,6 +3024,8 @@
    *  您 -> 客户：麦克风进翻译，译文声音 replaceTrack 送回通话；原声按比例垫在下面
    *  翻译断开时把原麦克风轨道放回去，通话不会变成静音
    *  术语表：设置里的「通话术语」+ 原来的翻译术语表。同声传译模型不能保证照术语读，要强制译法用「带术语表」
+   *  耳机模式：麦克风一直送去翻译。外放模式：对方出声时把麦克风从翻译通道掐掉，避免扬声器回声被再翻一遍
+   *  引擎表 CALL_PROVIDERS / registerCallProvider。国内同声传译（豆包、通义）还没定，先不接
    * ==================================================================== */
   const CALL_TRANSLATE_MODEL = 'gpt-realtime-translate';
   const CALL_AGENT_MODEL = 'gpt-realtime-2.1';
@@ -3062,6 +3067,26 @@
   let callTries = { out: 0, in: 0 };
   let callTimers = { out: 0, in: 0 };
   let callMtSeq = 0;
+  let callGate = null;
+  let callGateSrc = null;
+  let callGateDest = null;
+  let callGateTrack = null;
+  let callFeedTrack = null;
+  let callRemoteHot = false;
+  let callRemoteUntil = 0;
+  let callHeardRemote = false;
+  let callLeoHot = false;
+  let callGateOpen = true;
+  let callLevelTimer = null;
+  let callRemoteAnalyser = null;
+  let callLocalAnalyser = null;
+  let callRemoteSrc = null;
+  let callLocalSrc = null;
+  let callBoundRemote = null;
+  let callBoundLocal = null;
+  let callWatchedRemote = null;
+  let callLastRemoteRms = 0;
+  let callLastLocalRms = 0;
   const callHist = { inZh: [], inSrc: [], out: [], me: [] };
   const callBucket = { inZh: '', inSrc: '', out: '', me: '' };
 
@@ -3074,6 +3099,50 @@
     const n = Number(store.get('callDuck', 15));
     if (!isFinite(n)) return 0.15;
     return Math.min(100, Math.max(0, n)) / 100;
+  }
+  function callAudioMode() {
+    return store.get('callAudioMode', 'headphone') === 'speaker' ? 'speaker' : 'headphone';
+  }
+  function callRemoteRms() {
+    const n = Number(store.get('callRemoteRms', 0.02));
+    if (!isFinite(n)) return 0.02;
+    return Math.min(0.2, Math.max(0.005, n));
+  }
+  function callLocalRms() {
+    const n = Number(store.get('callLocalRms', 0.03));
+    if (!isFinite(n)) return 0.03;
+    return Math.min(0.2, Math.max(0.005, n));
+  }
+  function callSpeakerHangMs() {
+    const n = Number(store.get('callSpeakerHangMs', 400));
+    if (!isFinite(n)) return 400;
+    return Math.round(Math.min(800, Math.max(200, n)));
+  }
+  // 外放模式时，浏览器新开的麦克风带上回声消除和降噪。耳机模式不改 WhatsApp 原来的参数。
+  function speakerMicConstraints(constraints) {
+    try {
+      if (!store || store.get('callAudioMode', 'headphone') !== 'speaker') return constraints;
+    } catch (e) { return constraints; }
+    if (!constraints || !constraints.audio) return constraints;
+    const next = {};
+    for (const k in constraints) next[k] = constraints[k];
+    const audio = constraints.audio === true ? {} : {};
+    if (constraints.audio && constraints.audio !== true) {
+      for (const k in constraints.audio) audio[k] = constraints.audio[k];
+    }
+    audio.echoCancellation = true;
+    audio.noiseSuppression = true;
+    if (audio.autoGainControl == null) audio.autoGainControl = true;
+    next.audio = audio;
+    return next;
+  }
+  function preferMicProcessing(track) {
+    if (!track || typeof track.applyConstraints !== 'function') return;
+    if (callAudioMode() !== 'speaker') return;
+    try {
+      const p = track.applyConstraints({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) { /* 有的音轨不让改处理参数，外放门控仍然生效 */ }
   }
   function callOutId() {
     const id = store.get('callOutProvider', 'openai-translate') || 'openai-translate';
@@ -3247,10 +3316,13 @@
         el.id = id;
         el.autoplay = true;
         el.muted = true;
+        el.volume = 0;
         el.setAttribute('playsinline', '');
         el.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
         document.documentElement.appendChild(el);
       }
+      el.muted = true;
+      el.volume = 0;
       el.srcObject = stream;
       const p = el.play();
       if (p && p.catch) p.catch(function () {});
@@ -3482,11 +3554,17 @@
     return Promise.resolve(handle);
   }
 
+  // 每家引擎：start({ direction, track, lang, onEvent }) => { updateLanguage, replaceSource, close, send?, fail? }
+  // 国内同声传译（火山豆包、通义 LiveTranslate）还没选定，不要在这里接。选定后 registerCallProvider 加一行即可。
   const CALL_PROVIDERS = {
     'openai-translate': { label: '同声传译（最快，术语表不保证）', dirs: 'both', start: startTranslate },
     'openai-agent': { label: '带术语表（稍慢，句尾停顿后再开口）', dirs: 'out', start: startAgent },
     'openai-transcribe': { label: '转写再翻译（更省，适合对方字幕）', dirs: 'in', start: startTranscribe },
   };
+  function registerCallProvider(id, spec) {
+    if (!id || !spec || typeof spec.start !== 'function') throw new Error('引擎需要 start');
+    CALL_PROVIDERS[id] = { label: spec.label || id, dirs: spec.dirs || 'both', start: spec.start };
+  }
   try {
     const loc0 = pageWin().location;
     if (loc0 && (loc0.protocol === 'file:' || loc0.hostname === 'localhost')) CALL_PROVIDERS.fake = { label: 'fake', dirs: 'both', start: startFake };
@@ -3520,6 +3598,14 @@
     if (det) det.textContent = callDetected ? ('识别到 ' + callLangName(callDetected)) : '还没听出客户的语言';
     const sel = document.getElementById('wat-call-lang');
     if (sel && document.activeElement !== sel) sel.value = store.get('callLangMode', 'auto') || 'auto';
+    const modeSel = document.getElementById('wat-call-audio');
+    if (modeSel && document.activeElement !== modeSel) modeSel.value = callAudioMode();
+    const tip = document.getElementById('wat-call-tip');
+    if (tip) {
+      tip.textContent = callAudioMode() === 'speaker'
+        ? '外放模式：对方说话时，您的麦克风不会送去翻译（含说完后约 ' + callSpeakerHangMs() + ' 毫秒）。等您开口再继续。中文译文不从扬声器播放。房间要安静。'
+        : '耳机模式：您的话一直送去翻译。请戴耳机。用扬声器外放时，放出的声音会被麦克风收进去，再翻一遍。';
+    }
   }
   function ensureCallBox() {
     if (document.getElementById('wat-callbox')) return;
@@ -3527,8 +3613,10 @@
     box.id = 'wat-callbox';
     box.style.display = 'none';
     box.innerHTML = '<div class="hd"><b>通话同传</b><span class="st" id="wat-call-st"></span></div>' +
-      '<div class="tip">请戴耳机。用扬声器外放时，放出的声音会被麦克风收进去，再翻一遍。</div>' +
-      '<div class="row"><span class="lab">客户听到的语言</span><select id="wat-call-lang">' +
+      '<div class="tip" id="wat-call-tip">耳机模式：您的话一直送去翻译。请戴耳机。用扬声器外放时，放出的声音会被麦克风收进去，再翻一遍。</div>' +
+      '<div class="row"><span class="lab">听音</span><select id="wat-call-audio">' +
+      '<option value="headphone">耳机模式</option><option value="speaker">外放模式</option></select>' +
+      '<span class="lab">客户听到的语言</span><select id="wat-call-lang">' +
       '<option value="auto">自动（跟着客户）</option><option value="en">英语</option><option value="es">西语</option><option value="fr">法语</option>' +
       '</select><span class="lab" id="wat-call-det"></span></div>' +
       '<div class="lab">对方说的（中文）</div><div class="sub" id="wat-call-in-zh"></div>' +
@@ -3543,6 +3631,8 @@
       if (callPhase === 'live') setCallStatus(liveCallStatus());
       else paintCall();
     });
+    const modeSel = box.querySelector('#wat-call-audio');
+    modeSel.addEventListener('change', () => { setCallAudioMode(modeSel.value); });
   }
   function showCallBox() { ensureCallBox(); const box = document.getElementById('wat-callbox'); if (box) box.style.display = 'block'; paintCall(); }
   function hideCallBox() { const box = document.getElementById('wat-callbox'); if (box) box.style.display = 'none'; }
@@ -3628,7 +3718,8 @@
           slot.muted = false;
           slot.original = track;
           try { buildCallGraph(track); } catch (e) {}
-          if (callOut && callOut.replaceSource) { try { callOut.replaceSource(track); } catch (e) {} }
+          if (callAudioMode() === 'speaker') preferMicProcessing(track);
+          if (callOut && callOut.replaceSource) { try { callOut.replaceSource(feedTranslator(track)); } catch (e) {} }
           return callNativeReplace.call(this, callMixed);
         }
       } catch (e) { /* 钩子出错就用原来的，避免没声音 */ }
@@ -3639,6 +3730,142 @@
     const proto = rtpProto();
     if (proto && callNativeReplace) proto.replaceTrack = callNativeReplace;
     callNativeReplace = null;
+  }
+  function readRms(analyser) {
+    if (!analyser) return 0;
+    const buf = new Uint8Array(analyser.fftSize || 1024);
+    try { analyser.getByteTimeDomainData(buf); } catch (e) { return 0; }
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const x = (buf[i] - 128) / 128;
+      sum += x * x;
+    }
+    return Math.sqrt(sum / buf.length);
+  }
+  function bindLevelInput(track, which) {
+    if (!callAudio || !track) return;
+    try {
+      const analyser = callAudio.createAnalyser();
+      analyser.fftSize = 1024;
+      const src = callAudio.createMediaStreamSource(new MediaStream([track]));
+      src.connect(analyser);
+      if (which === 'remote') {
+        if (callRemoteSrc) { try { callRemoteSrc.disconnect(); } catch (e) {} }
+        callRemoteSrc = src;
+        callRemoteAnalyser = analyser;
+        callBoundRemote = track;
+      } else {
+        if (callLocalSrc) { try { callLocalSrc.disconnect(); } catch (e) {} }
+        callLocalSrc = src;
+        callLocalAnalyser = analyser;
+        callBoundLocal = track;
+      }
+    } catch (e) { /* 量不到能量就不做外放门控，耳机模式不受影响 */ }
+  }
+  function currentRemoteTrack() {
+    const live = callActivePc ? remoteCallTrack(callActivePc) : null;
+    return live || callWatchedRemote;
+  }
+  function syncSpeakerWatch() {
+    if (callAudioMode() !== 'speaker' || !callAudio) return;
+    const remote = currentRemoteTrack();
+    if (remote && remote !== callBoundRemote) bindLevelInput(remote, 'remote');
+    const local = callSlots[0] && callSlots[0].original;
+    if (local && local !== callBoundLocal) bindLevelInput(local, 'local');
+    ensureLevelTimer();
+  }
+  function ensureLevelTimer() {
+    if (callLevelTimer) return;
+    callLevelTimer = setInterval(() => {
+      try {
+        if (callAudioMode() !== 'speaker' || callClosing) return;
+        callLastRemoteRms = readRms(callRemoteAnalyser);
+        callLastLocalRms = readRms(callLocalAnalyser);
+        noteCallLevels(callLastRemoteRms, callLastLocalRms);
+      } catch (e) {}
+    }, 80);
+  }
+  function gateShouldClose() {
+    if (callAudioMode() !== 'speaker') return false;
+    if (callRemoteHot) return true;
+    if (callHeardRemote && !callLeoHot) return true;
+    return false;
+  }
+  function noteCallLevels(remoteRms, localRms) {
+    const now = Date.now();
+    if (remoteRms >= callRemoteRms()) {
+      callHeardRemote = true;
+      callRemoteHot = true;
+      callRemoteUntil = now + callSpeakerHangMs();
+      callLeoHot = false;
+    } else if (callRemoteHot && now >= callRemoteUntil) {
+      callRemoteHot = false;
+    }
+    if (!callRemoteHot && localRms >= callLocalRms()) callLeoHot = true;
+    applySpeakerGate();
+  }
+  function applySpeakerGate() {
+    const close = gateShouldClose();
+    callGateOpen = !close;
+    if (callGate && callAudio) {
+      const g = close ? 0 : 1;
+      callGate.gain.value = g;
+      try { callGate.gain.setTargetAtTime(g, callAudio.currentTime, 0.02); } catch (e) {}
+    }
+    if (callAudioMode() === 'speaker') applyCallDuck();
+  }
+  function ensureGateTrack(track) {
+    if (!callAudio || !track) return track;
+    if (!callGate || !callGateDest) {
+      callGate = callAudio.createGain();
+      callGate.gain.value = 1;
+      callGateDest = callAudio.createMediaStreamDestination();
+      callGate.connect(callGateDest);
+      callGateTrack = callGateDest.stream.getAudioTracks()[0];
+    }
+    if (callGateSrc) { try { callGateSrc.disconnect(); } catch (e) {} }
+    try {
+      callGateSrc = callAudio.createMediaStreamSource(new MediaStream([track]));
+      callGateSrc.connect(callGate);
+    } catch (e) { return track; }
+    applySpeakerGate();
+    return callGateTrack || track;
+  }
+  function feedTranslator(raw) {
+    if (!raw) return raw;
+    if (callAudioMode() === 'speaker') {
+      callFeedTrack = ensureGateTrack(raw) || raw;
+      return callFeedTrack;
+    }
+    callFeedTrack = raw;
+    return raw;
+  }
+  function setCallAudioMode(mode) {
+    store.set('callAudioMode', mode === 'speaker' ? 'speaker' : 'headphone');
+    if (callAudioMode() !== 'speaker') {
+      callRemoteHot = false;
+      callHeardRemote = false;
+      callLeoHot = false;
+      callGateOpen = true;
+      if (callGate) callGate.gain.value = 1;
+    }
+    const raw = callSlots[0] && callSlots[0].original;
+    if (raw && callAudioMode() === 'speaker') preferMicProcessing(raw);
+    if (raw && callOut && callOut.replaceSource) {
+      try { callOut.replaceSource(feedTranslator(raw)); } catch (e) {}
+    } else if (raw) {
+      feedTranslator(raw);
+    }
+    if (callAudioMode() === 'speaker') syncSpeakerWatch();
+    applyCallDuck();
+    applySpeakerGate();
+    if (callPhase === 'live') setCallStatus(liveCallStatus());
+    else paintCall();
+  }
+  function watchRemoteForTest(track) {
+    callWatchedRemote = track || null;
+    callBoundRemote = null;
+    syncSpeakerWatch();
   }
   function buildCallGraph(track) {
     const AC = pageWin().AudioContext || pageWin().webkitAudioContext;
@@ -3661,10 +3888,16 @@
     callMicNode = callAudio.createMediaStreamSource(new MediaStream([track]));
     callMicNode.connect(callDuck);
   }
+  function duckTarget() {
+    if (!(callEngaged && !callFallback)) return 1;
+    if (gateShouldClose()) return 0;
+    return callDuckGain();
+  }
   function applyCallDuck() {
     if (!callDuck || !callAudio) return;
-    const v = (callEngaged && !callFallback) ? callDuckGain() : 1;
-    try { callDuck.gain.setTargetAtTime(v, callAudio.currentTime, 0.04); } catch (e) { callDuck.gain.value = v; }
+    const v = duckTarget();
+    callDuck.gain.value = v;
+    try { callDuck.gain.setTargetAtTime(v, callAudio.currentTime, 0.04); } catch (e) {}
   }
   function connectCallTts(stream) {
     if (!callAudio || !callTtsGain) return;
@@ -3717,7 +3950,8 @@
     const id = callOutId();
     const how = id === 'openai-agent' ? '带术语表' : id === 'openai-translate' ? '同声传译' : id === 'fake' ? '测试' : id;
     if (!callSlots.length) return '只在出字幕（没有找到送出的麦克风）';
-    return '同传中 · 客户听到' + callLangName(callTargetLang()) + ' · ' + how;
+    const room = callAudioMode() === 'speaker' ? '外放' : '耳机';
+    return '同传中 · ' + room + ' · 客户听到' + callLangName(callTargetLang()) + ' · ' + how;
   }
   async function ensureCallRunning() {
     if (!callAudio) return false;
@@ -3778,6 +4012,7 @@
   function onInEvent(ev) {
     if (!ev || callClosing) return;
     if (ev.type === 'open') { callTries.in = 0; if (callPhase === 'live') setCallStatus(liveCallStatus()); return; }
+    // 对方方向只出字幕。中文语音不接到扬声器，外放模式尤其不能放。
     if (ev.type === 'audio-track') return;
     if (ev.type === 'transcript') {
       if (callInId() === 'openai-transcribe') takeCallText('inSrc', ev);
@@ -3815,7 +4050,9 @@
       const rs = pc.getReceivers ? pc.getReceivers() : [];
       for (let i = 0; i < rs.length; i++) {
         const tr = rs[i].track;
-        if (tr && tr.kind === 'audio' && tr.readyState === 'live') return tr;
+        // 还没协商时，发送端那条 transceiver 的 receiver 是一条静音占位，不能当成客户的声音
+        if (!tr || tr.kind !== 'audio' || tr.readyState !== 'live' || tr.muted) continue;
+        return tr;
       }
     } catch (e) {}
     return null;
@@ -3846,13 +4083,18 @@
       setCallStatus('音频初始化失败（' + e.message + '）。客户听到的是您的原声。');
       return;
     }
+    if (callAudioMode() === 'speaker') {
+      preferMicProcessing(track);
+      syncSpeakerWatch();
+    }
+    const feed = feedTranslator(track);
     const prov = CALL_PROVIDERS[callOutId()];
     if (!prov || prov.dirs === 'in') { setCallStatus('我方语音引擎不可用'); return; }
     const lang = callTargetLang();
     try {
       const handle = await prov.start({
         direction: 'out',
-        track: track,
+        track: feed,
         lang: lang === 'zh' ? 'en' : lang,
         onEvent: (ev) => { if (my === callOutGen) onOutEvent(ev); },
       });
@@ -3931,6 +4173,14 @@
     if (callMicNode) { try { callMicNode.disconnect(); } catch (e) {} }
     if (callTtsNode) { try { callTtsNode.disconnect(); } catch (e) {} }
     callMicNode = null; callTtsNode = null;
+    if (callLevelTimer) { clearInterval(callLevelTimer); callLevelTimer = null; }
+    if (callRemoteSrc) { try { callRemoteSrc.disconnect(); } catch (e) {} }
+    if (callLocalSrc) { try { callLocalSrc.disconnect(); } catch (e) {} }
+    if (callGateSrc) { try { callGateSrc.disconnect(); } catch (e) {} }
+    callRemoteSrc = null; callLocalSrc = null; callRemoteAnalyser = null; callLocalAnalyser = null;
+    callBoundRemote = null; callBoundLocal = null; callWatchedRemote = null;
+    callGate = null; callGateSrc = null; callGateDest = null; callGateTrack = null; callFeedTrack = null;
+    callRemoteHot = false; callRemoteUntil = 0; callHeardRemote = false; callLeoHot = false; callGateOpen = true;
     if (callAudio && callAudio.state !== 'closed') { try { callAudio.close(); } catch (e) {} }
     callAudio = null; callDest = null; callDuck = null; callTtsGain = null; callMixed = null;
     callActivePc = null;
@@ -3995,7 +4245,8 @@
         if (cur !== callMixed && cur.readyState === 'live' && cur !== s.original) {
           s.original = cur;
           try { buildCallGraph(cur); } catch (e) {}
-          if (callOut && callOut.replaceSource) { try { callOut.replaceSource(cur); } catch (e) {} }
+          if (callAudioMode() === 'speaker') preferMicProcessing(cur);
+          if (callOut && callOut.replaceSource) { try { callOut.replaceSource(feedTranslator(cur)); } catch (e) {} }
         }
         if (s.sender.track !== callMixed) {
           try { nativeSetTrack(s.sender, callMixed); } catch (e) {}
@@ -4006,6 +4257,7 @@
       const rt = remoteCallTrack(callActivePc);
       if (rt) startCallIn();
     }
+    if (callAudioMode() === 'speaker') syncSpeakerWatch();
   }
   function callTick() {
     try {
@@ -4083,6 +4335,18 @@
       fallback: !!callFallback,
       engaged: !!callEngaged,
       duck: callDuckGain(),
+      audioMode: callAudioMode(),
+      audioRunning: !!(callAudio && callAudio.state === 'running'),
+      hasRemoteAnalyser: !!callRemoteAnalyser,
+      lastRemoteRms: callLastRemoteRms,
+      lastLocalRms: callLastLocalRms,
+      gateOpen: callAudioMode() === 'speaker' ? !!callGateOpen : true,
+      remoteHot: !!callRemoteHot,
+      heardRemote: !!callHeardRemote,
+      leoHot: !!callLeoHot,
+      feedTrackId: callFeedTrack ? callFeedTrack.id : '',
+      gateTrackId: callGateTrack ? callGateTrack.id : '',
+      incomingPlayback: false,
       senderTrackId: slot && slot.sender.track ? slot.sender.track.id : '',
       originalTrackId: slot && slot.original ? slot.original.id : '',
       mixed: !!(slot && callMixed && slot.sender.track === callMixed),
@@ -4119,6 +4383,16 @@
     silenceIn.value = String(callSilenceMs());
     const duckIn = h('input', { type: 'number', id: 'wat-call-duck', min: '0', max: '100', step: '5' });
     duckIn.value = String(Math.round(callDuckGain() * 100));
+    const modeSel = h('select', { id: 'wat-call-mode', class: 'pi-in' },
+      h('option', { value: 'headphone' }, '耳机模式（推荐）'),
+      h('option', { value: 'speaker' }, '外放模式（安静房间、不戴耳机）'));
+    modeSel.value = callAudioMode();
+    const remoteRmsIn = h('input', { type: 'number', id: 'wat-call-remote-rms', min: '0.005', max: '0.2', step: '0.005' });
+    remoteRmsIn.value = String(callRemoteRms());
+    const hangIn = h('input', { type: 'number', id: 'wat-call-hang', min: '200', max: '800', step: '50' });
+    hangIn.value = String(callSpeakerHangMs());
+    const localRmsIn = h('input', { type: 'number', id: 'wat-call-local-rms', min: '0.005', max: '0.2', step: '0.005' });
+    localRmsIn.value = String(callLocalRms());
     const showIn = h('input', { type: 'checkbox', id: 'wat-call-orig' });
     showIn.checked = store.get('callShowOrig', true) !== false;
     const termsIn = h('textarea', { id: 'wat-call-terms', rows: '4', placeholder: '每行一个专名，例如 Chery、RELY、R8、Tiggo、瑞虎' });
@@ -4155,6 +4429,12 @@
       h('div', { class: 'wp-muted' }, '只影响「带术语表」和「转写再翻译」。300 更快但容易把一句话切断；600 更稳但更慢。同声传译不看这个数，它是边说边译。'),
       h('label', null, '原声混入（0–100，0 表示客户只听到译文）'), duckIn,
       h('div', { class: 'wp-muted' }, '15 左右是译文下面垫一层很小的您的原声。翻译服务一旦断开，会立刻改回 100% 原声，避免对方听成静音。'),
+      h('label', null, '听音方式（通话中也可以在浮层里改）'), modeSel,
+      h('div', { class: 'wp-muted' }, '耳机模式和以前一样。外放模式给安静、不戴耳机的房间：浏览器麦克风打开回声消除和降噪；对方一开始说话，就把您的麦克风从翻译通道掐掉，送给对方的原声也暂时静音，避免扬声器里的话被再翻一遍。对方停口后再等下面的尾音，然后要等您开口才继续翻译。对方的中文只出字幕，不从扬声器放出来。'),
+      h('label', null, '外放：把对方当成「正在说话」的音量（0.005–0.2，默认 0.02）'), remoteRmsIn,
+      h('label', null, '外放：对方停口后的尾音（毫秒，200–800，默认 400）'), hangIn,
+      h('label', null, '外放：把您当成「开始说话」的音量（0.005–0.2，默认 0.03）'), localRmsIn,
+      h('div', { class: 'wp-muted' }, '房间有底噪时，把「您开始说话」的音量调高一点，避免尾音刚过就把杂音送去翻译。对方声音小、门控关得太晚，就把对方音量调低。国内同声传译接口（豆包、通义）还没定，这里先不接；选定后只加一个引擎，不用改这条通话流程。'),
       h('label', { class: 'ws-inline' }, showIn, ' 字幕里同时显示原文'),
       h('label', null, '通话术语（每行一个专名；也会带上「基本设置」里的翻译术语表）'), termsIn,
       h('div', { class: 'wp-muted' }, '术语写成「中文 = 英文 | 西语 | 法语」时，第三段法语只给通话用，不影响原来的文字翻译。'));
@@ -4168,6 +4448,13 @@
       store.set('callSilenceMs', isFinite(silence) ? Math.round(Math.min(800, Math.max(200, silence))) : 400);
       const duck = Number(duckIn.value);
       store.set('callDuck', isFinite(duck) ? Math.round(Math.min(100, Math.max(0, duck))) : 15);
+      store.set('callAudioMode', modeSel.value === 'speaker' ? 'speaker' : 'headphone');
+      const remoteRms = Number(remoteRmsIn.value);
+      store.set('callRemoteRms', isFinite(remoteRms) ? Math.min(0.2, Math.max(0.005, remoteRms)) : 0.02);
+      const localRms = Number(localRmsIn.value);
+      store.set('callLocalRms', isFinite(localRms) ? Math.min(0.2, Math.max(0.005, localRms)) : 0.03);
+      const hang = Number(hangIn.value);
+      store.set('callSpeakerHangMs', isFinite(hang) ? Math.round(Math.min(800, Math.max(200, hang))) : 400);
       store.set('callShowOrig', !!showIn.checked);
       store.set('callTerms', termsIn.value);
       try { onCallSettingsSaved(); } catch (e) {}
@@ -4195,6 +4482,8 @@
           attach: attachCallForTest,
           failOut: failCallOut,
           setOn: setCallOn,
+          watchRemote: watchRemoteForTest,
+          registerProvider: registerCallProvider,
         };
       }
     } catch (e) { /* 正式页面不挂测试接口 */ }
