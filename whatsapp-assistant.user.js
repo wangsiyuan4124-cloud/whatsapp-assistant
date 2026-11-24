@@ -1,25 +1,113 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.7.9
-// @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票。
+// @version      1.8.0
+// @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @connect      translate.googleapis.com
 // @connect      edge.microsoft.com
 // @connect      api-edge.cognitive.microsofttranslator.com
 // @connect      api.deepseek.com
+// @connect      api.openai.com
+// @connect      *
 // @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
-// @run-at       document-idle
+// @run-at       document-start
+// @inject-into  page
 // @updateURL    https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/wangsiyuan4124-cloud/whatsapp-assistant/main/whatsapp-assistant.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  /* ---------------- 通话同传：尽早钩住 WebRTC（功能关闭时不改音轨） ---------------- */
+  let rtcApi = null;
+  function pageWin() {
+    try {
+      if (typeof unsafeWindow !== 'undefined' && unsafeWindow) return unsafeWindow;
+    } catch (e) { /* 沙箱里没有 unsafeWindow */ }
+    return (typeof window !== 'undefined') ? window : globalThis;
+  }
+  function installRtcHook() {
+    const root = pageWin();
+    if (!root) return;
+    try {
+      if (root.__watRtcHookV1) { rtcApi = root.__watRtcHookV1; return; }
+    } catch (e) { /* ignore */ }
+    const OrigPC = root.RTCPeerConnection || root.webkitRTCPeerConnection;
+    if (typeof OrigPC !== 'function') return;
+    const api = {
+      hooked: true,
+      pcs: new Set(),
+      own: new WeakSet(),
+      onMic: null,
+      onRemoteTrack: null,
+      rawGetUserMedia: null,
+      makeOwn(cfg) {
+        const pc = new OrigPC(cfg);
+        api.own.add(pc);
+        return pc;
+      },
+    };
+    function WatPC() {
+      const pc = new OrigPC(...arguments);
+      if (api.own.has(pc)) return pc;
+      api.pcs.add(pc);
+      try {
+        pc.addEventListener('track', (ev) => {
+          try { if (api.onRemoteTrack) api.onRemoteTrack(pc, ev); } catch (err) { /* ignore */ }
+        });
+      } catch (err) { /* ignore */ }
+      try {
+        pc.addEventListener('connectionstatechange', () => {
+          try {
+            if (pc.connectionState === 'closed') api.pcs.delete(pc);
+          } catch (e2) { /* ignore */ }
+        });
+      } catch (err) { /* ignore */ }
+      return pc;
+    }
+    WatPC.prototype = OrigPC.prototype;
+    try { Object.setPrototypeOf(WatPC, OrigPC); } catch (e) { /* ignore */ }
+    try {
+      if (typeof OrigPC.generateCertificate === 'function') WatPC.generateCertificate = OrigPC.generateCertificate.bind(OrigPC);
+    } catch (e) { /* ignore */ }
+    try { WatPC.toString = function () { return OrigPC.toString(); }; } catch (e) { /* ignore */ }
+    root.RTCPeerConnection = WatPC;
+    if (root.webkitRTCPeerConnection) root.webkitRTCPeerConnection = WatPC;
+    try {
+      const md = root.navigator && root.navigator.mediaDevices;
+      const origGum = md && md.getUserMedia;
+      if (typeof origGum === 'function') {
+        const bound = origGum.bind(md);
+        api.rawGetUserMedia = bound;
+        const wrapped = function () {
+          return Promise.resolve(bound.apply(md, arguments)).then((stream) => {
+            try { if (api.onMic) api.onMic(stream); } catch (err) { /* ignore */ }
+            return stream;
+          });
+        };
+        try { wrapped.toString = function () { return origGum.toString(); }; } catch (e) { /* ignore */ }
+        md.getUserMedia = wrapped;
+      }
+    } catch (e) { /* 没有 mediaDevices 也不影响文字翻译 */ }
+    try {
+      Object.defineProperty(root, '__watRtcHookV1', { value: api, enumerable: false, configurable: true, writable: true });
+    } catch (e) {
+      try { root.__watRtcHookV1 = api; } catch (e2) { /* ignore */ }
+    }
+    rtcApi = api;
+    try {
+      const loc = root.location;
+      if (loc && (loc.protocol === 'file:' || loc.hostname === 'localhost')) root.__WAT_RTC__ = api;
+    } catch (e) { /* ignore */ }
+  }
+  try { installRtcHook(); } catch (e) { rtcApi = null; }
 
   /* ---------------- 配置 ---------------- */
   const LANGS = [
@@ -573,10 +661,18 @@
   }
 
   let scanTimer = null;
-  new MutationObserver(() => {
-    if (scanTimer) return;
-    scanTimer = setTimeout(() => { scanTimer = null; scanIncoming(); }, 300);
-  }).observe(document.body, { childList: true, subtree: true });
+  function watchIncomingDom() {
+    // document-start 时 body 可能还没有；等 DOM 再观察，避免整段脚本中断
+    if (!document.body) {
+      document.addEventListener('DOMContentLoaded', watchIncomingDom, { once: true });
+      return;
+    }
+    new MutationObserver(() => {
+      if (scanTimer) return;
+      scanTimer = setTimeout(() => { scanTimer = null; scanIncoming(); }, 300);
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+  watchIncomingDom();
 
   /* ---------------- 悬浮控制条 ---------------- */
   const style = document.createElement('style');
@@ -687,6 +783,19 @@
   #wat-chip.wat-chip-btn{background:#25d366;color:#fff}
   #wat-chip.wat-chip-result{background:#fffbe6;color:#111;border:1px solid #e8d48a}
   #wat-chip button{margin-top:4px;font:inherit;border:0;border-radius:8px;padding:2px 8px;background:#25d366;color:#fff;cursor:pointer}
+  #wat-callbox{position:fixed;z-index:10005;top:12px;left:50%;transform:translateX(-50%);width:min(520px,calc(100vw - 24px));
+    background:rgba(17,27,33,.92);color:#e9edef;border-radius:12px;padding:8px 12px 10px;font:13px/1.45 system-ui,"Microsoft YaHei",sans-serif;
+    box-shadow:0 6px 24px rgba(0,0,0,.28)}
+  #wat-callbox .hd{display:flex;gap:8px;align-items:baseline;justify-content:space-between}
+  #wat-callbox .hd b{font-size:13px}
+  #wat-callbox .st{font-size:12px;color:#d1d7db;text-align:right}
+  #wat-callbox .tip{margin-top:4px;font-size:12px;color:#ffe08a}
+  #wat-callbox .row{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
+  #wat-callbox select{font:inherit;border:0;border-radius:6px;padding:2px 4px;background:#2a3942;color:#e9edef}
+  #wat-callbox .sub{margin-top:6px;font-size:16px;line-height:1.4;color:#fff;white-space:pre-wrap}
+  #wat-callbox .out{margin-top:4px;font-size:14px;color:#7dffb3;white-space:pre-wrap}
+  #wat-callbox .orig{margin-top:2px;font-size:12px;color:#aebac1;white-space:pre-wrap}
+  #wat-callbox .lab{color:#8696a0;font-size:11px}
   @media (prefers-color-scheme: dark){
     #wat-bar{background:#202c33;color:#e9edef;border-color:#3b4a54}
     #wat-bar select{background:#2a3942;color:#e9edef;border-color:#3b4a54}
@@ -702,6 +811,7 @@
     <label title="开启后：输入含中文时按回车，自动翻译并发送"><input type="checkbox" id="wat-auto">回车自动翻译发送</label>
     <label title="对方发来的外语消息，在原文下方自动显示中文译文"><input type="checkbox" id="wat-in">对方消息译中文</label>
     <select id="wat-engine" title="发送翻译引擎。AI：结合聊天上下文、说法更地道（需要 DeepSeek Key，失败自动换谷歌）。对方消息的中文译文始终用谷歌/微软"><option value="ai">AI 翻译</option><option value="google">谷歌</option><option value="microsoft">微软</option></select>
+    <label title="WhatsApp 网页语音通话：把您说的中文翻成客户的语言说给对方听，并把对方的话显示成中文字幕。默认关闭，不影响文字翻译。请戴耳机。"><input type="checkbox" id="wat-call">通话同传</label>
     <button id="wat-analyze" title="AI 分析当前客户的级别并给出回复建议" style="background:#027eb5">分析客户</button>
     <button id="wat-set" title="设置（API Key、价格表、话术库）" style="background:#8696a0">⚙</button>
     <button id="wat-go" title="只翻译不发送（快捷键 Ctrl+Enter）">翻译</button>
@@ -1815,6 +1925,7 @@
     const piSec = piSettingsSection();
     const learnSec = learnSettingsSection();
     const catSec = catalogSettingsSection();
+    const callSec = callSettingsSection();
     const pbBox = h('div', { class: 'ws-pb' });
     const renderPb = () => {
       pbBox.innerHTML = '';
@@ -1839,18 +1950,19 @@
       pb: h('div', null, h('label', null, '话术库（共 ' + ai.playbook().length + ' 条，新收藏的在上面；带 [方括号备注] 的不会交给 AI）'), pbBox),
       learn: learnSec,
       cat: catSec,
+      call: callSec,
     };
     const tabBtns = {};
     const showTab = (k) => {
       Object.keys(pages).forEach((x) => { pages[x].style.display = x === k ? '' : 'none'; tabBtns[x].classList.toggle('on', x === k); });
     };
-    [['basic', '基本设置'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库'], ['learn', 'AI 学到的'], ['cat', '车型资料']].forEach(([k, t]) => {
+    [['basic', '基本设置'], ['call', '通话同传'], ['pi', 'PI 发票（公司 / 银行 / 公章 / Logo）'], ['pb', '话术库'], ['learn', 'AI 学到的'], ['cat', '车型资料']].forEach(([k, t]) => {
       tabBtns[k] = h('button', { class: 'ws-tab', onclick: () => showTab(k) }, t);
     });
     setDlg.appendChild(h('div', { class: 'ws-card' },
       h('div', { class: 'wp-head' }, h('b', null, '翻译助手设置'), h('button', { class: 'wp-x', onclick: () => { setDlg.style.display = 'none'; } }, '×')),
       h('div', { class: 'ws-tabs' }, Object.values(tabBtns)),
-      pages.basic, pages.pi, pages.pb, pages.learn, pages.cat,
+      pages.basic, pages.call, pages.pi, pages.pb, pages.learn, pages.cat,
       h('div', { class: 'wp-btns ws-save', style: 'justify-content:flex-end;margin-top:10px' },
         h('button', { class: 'sec', onclick: () => {
           const data = JSON.stringify(ai.playbook(), null, 2);
@@ -1868,6 +1980,7 @@
           piSec.save();
           learnSec.save();
           catSec.save();
+          callSec.save();
           setDlg.style.display = 'none';
           toast('设置已保存');
           if (panelView === 'pi' && getChatName()) openPI(false); // 刷新 PI 表单上方的提醒
@@ -2901,6 +3014,1192 @@
     sec.save = () => catStore.setPrice(tmpPrice());
     return sec;
   }
+
+  /* ======================================================================
+   *  通话同传（默认关闭）
+   *  客户 -> 您：拿网页通话的远端音轨，字幕显示中文（可留原文）
+   *  您 -> 客户：麦克风进翻译，译文声音 replaceTrack 送回通话；原声按比例垫在下面
+   *  翻译断开时把原麦克风轨道放回去，通话不会变成静音
+   *  术语表：设置里的「通话术语」+ 原来的翻译术语表。同声传译模型不能保证照术语读，要强制译法用「带术语表」
+   * ==================================================================== */
+  const CALL_TRANSLATE_MODEL = 'gpt-realtime-translate';
+  const CALL_AGENT_MODEL = 'gpt-realtime-2.1';
+  const CALL_TRANSCRIBE_MODEL = 'gpt-live-transcribe';
+  const CALL_WHISPER_MODEL = 'gpt-realtime-whisper';
+  const CALL_AGENT_VOICE = 'marin';
+  const DEFAULT_CALL_TERMS = 'Chery\nRELY\nR8\nTiggo\n瑞虎\n奇瑞\n威麟';
+  const CALL_LANGS = [['en', '英语'], ['es', '西语'], ['fr', '法语']];
+
+  let callPhase = 'idle';
+  let callStarting = false;
+  let callActivePc = null;
+  let callForcedPc = null;
+  let callSlots = [];
+  let callManaged = new WeakMap();
+  let callAudio = null;
+  let callDuck = null;
+  let callTtsGain = null;
+  let callDest = null;
+  let callMicNode = null;
+  let callTtsNode = null;
+  let callMixed = null;
+  let callEngaged = false;
+  let callFallback = false;
+  let callTold = false;
+  let callClosing = false;
+  let callOut = null;
+  let callIn = null;
+  let callOutGen = 0;
+  let callInGen = 0;
+  let callOutEpoch = 0;
+  let callInStarting = false;
+  let callLastMic = null;
+  let callNativeReplace = null;
+  let callStatusText = '';
+  let callDetected = '';
+  let callStreak = { lang: '', n: 0 };
+  let callHeard = '';
+  let callTries = { out: 0, in: 0 };
+  let callTimers = { out: 0, in: 0 };
+  let callMtSeq = 0;
+  const callHist = { inZh: [], inSrc: [], out: [], me: [] };
+  const callBucket = { inZh: '', inSrc: '', out: '', me: '' };
+
+  function callSilenceMs() {
+    const n = Number(store.get('callSilenceMs', 400));
+    if (!isFinite(n)) return 400;
+    return Math.round(Math.min(800, Math.max(200, n)));
+  }
+  function callDuckGain() {
+    const n = Number(store.get('callDuck', 15));
+    if (!isFinite(n)) return 0.15;
+    return Math.min(100, Math.max(0, n)) / 100;
+  }
+  function callOutId() {
+    const id = store.get('callOutProvider', 'openai-translate') || 'openai-translate';
+    return CALL_PROVIDERS[id] ? id : 'openai-translate';
+  }
+  function callInId() {
+    const id = store.get('callInProvider', 'openai-transcribe') || 'openai-transcribe';
+    return CALL_PROVIDERS[id] ? id : 'openai-transcribe';
+  }
+  function callHasCreds() {
+    if (callOutId() === 'fake' || callInId() === 'fake') return true;
+    return !!(String(store.get('callRelay', '') || '').trim() || String(store.get('callApiKey', '') || '').trim());
+  }
+  function callLangName(code) {
+    if (code === 'zh') return '中文';
+    const hit = CALL_LANGS.find((x) => x[0] === code);
+    return hit ? hit[1] : (code || '');
+  }
+  function callTargetLang() {
+    const mode = store.get('callLangMode', 'auto') || 'auto';
+    if (mode === 'en' || mode === 'es' || mode === 'fr') return mode;
+    if (callDetected === 'en' || callDetected === 'es' || callDetected === 'fr' || callDetected === 'zh') return callDetected;
+    try {
+      const chat = getChatLang();
+      if (chat === 'en' || chat === 'es' || chat === 'fr') return chat;
+    } catch (e) { /* 页面还没就绪 */ }
+    const d = store.get('defaultLang', 'en');
+    if (d === 'en' || d === 'es' || d === 'fr') return d;
+    return 'en';
+  }
+  function detectLang(text) {
+    const raw = String(text || '');
+    if (raw.replace(/\s/g, '').length < 8) return '';
+    const zh = (raw.match(/[\u3400-\u9fff]/g) || []).length;
+    const latin = (raw.match(/[A-Za-z\u00c0-\u024f]/g) || []).length;
+    if (zh >= 4 && zh >= latin) return 'zh';
+    const words = raw.toLowerCase().split(/[^a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1\u00e0\u00e2\u00e7\u00e8\u00ea\u00eb\u00ee\u00ef\u00f4\u00f9\u00fb\u0153']+/i).filter(Boolean);
+    const ES = new Set('el los las que por para con una hola gracias precio quiero como cuánto cuanto cuesta carro coche usado usted ustedes donde dónde'.split(' '));
+    const FR = new Set('le les des une et vous nous est pas pour avec bonjour merci prix voiture comment où ou quel quelle'.split(' '));
+    const BOTH = new Set('la de un en');
+    const EN = new Set('the of to and in is are you we they this that for with price car hello thanks please want how what where much can your'.split(' '));
+    let es = 0, fr = 0, en = 0;
+    words.forEach((w) => {
+      if (ES.has(w)) es++;
+      if (FR.has(w)) fr++;
+      if (EN.has(w)) en++;
+      if (BOTH.has(w)) { es++; fr++; }
+    });
+    if (/[¿¡ñ]/.test(raw)) es += 2;
+    if (/[áéíóú]/i.test(raw)) es += 1;
+    if (/[çœêëîïàèù]/i.test(raw)) fr += 2;
+    const ranked = [['es', es], ['fr', fr], ['en', en]].sort((a, b) => b[1] - a[1]);
+    if (!ranked[0][1]) return latin ? 'en' : '';
+    if (ranked[0][1] === ranked[1][1]) return '';
+    return ranked[0][0];
+  }
+  function termList() {
+    const out = [];
+    const seen = new Set();
+    const add = (s) => {
+      s = String(s || '').replace(/[<>\r\n]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!s || s.length > 40) return;
+      const k = s.toLowerCase();
+      if (seen.has(k)) return;
+      seen.add(k);
+      out.push(s);
+    };
+    String(store.get('callTerms', DEFAULT_CALL_TERMS)).split('\n').forEach(add);
+    String(store.get('glossary', '') || '').split('\n').forEach((line) => {
+      const m = line.match(/^\s*([^=＝#]+?)\s*[=＝]\s*(.+?)\s*$/);
+      if (!m) return;
+      add(m[1]);
+      m[2].split(/\s*[|｜]\s*/).forEach(add);
+    });
+    return out.slice(0, 40);
+  }
+  function agentInstructions(lang) {
+    const name = lang === 'es' ? 'Latin American Spanish' : lang === 'fr' ? 'French' : 'American English';
+    const terms = termList().slice(0, 30).map((t) => '- ' + t).join('\n');
+    return [
+      'You are a simultaneous interpreter on a live WhatsApp call for a car dealer in China.',
+      'The person you hear speaks Mandarin Chinese. Speak ONLY the translation in ' + name + '.',
+      'Do not answer, greet, explain, or add anything. Keep numbers, prices, and names exact.',
+      'Start speaking as soon as a phrase is clear. A short pause means the sentence ended.',
+      terms ? 'When they refer to these, say them exactly:\n' + terms : '',
+    ].filter(Boolean).join('\n');
+  }
+  function vadBody() {
+    return {
+      type: 'server_vad',
+      threshold: 0.5,
+      prefix_padding_ms: 200,
+      silence_duration_ms: callSilenceMs(),
+      create_response: true,
+      interrupt_response: true,
+    };
+  }
+  function transcribePrompt() {
+    return 'WhatsApp call about buying a Chery RELY car. The customer speaks English, Spanish, or French. Keep these names as spoken: ' + termList().slice(0, 20).join(', ');
+  }
+
+  function callHttp(opts) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') { reject(new Error('没有 GM_xmlhttpRequest')); return; }
+      GM_xmlhttpRequest(Object.assign({
+        timeout: 20000,
+        onload: (r) => {
+          if (r.status >= 200 && r.status < 300) resolve(r.responseText || '');
+          else reject(new Error('HTTP ' + r.status + ' ' + String(r.responseText || '').slice(0, 180)));
+        },
+        onerror: () => reject(new Error('网络错误')),
+        ontimeout: () => reject(new Error('请求超时')),
+      }, opts));
+    });
+  }
+  function relayEndpoint(relay) {
+    const s = String(relay || '').trim();
+    if (!s) return '';
+    if (/\/session\/?$/.test(s.split('?')[0])) return s;
+    return s.replace(/\/$/, '') + '/session';
+  }
+  async function mintCallSecret(url, body, creds) {
+    const relay = creds && creds.relay != null ? String(creds.relay).trim() : String(store.get('callRelay', '') || '').trim();
+    const relayKey = creds && creds.relayKey != null ? String(creds.relayKey).trim() : String(store.get('callRelayKey', '') || '').trim();
+    const apiKey = creds && creds.apiKey != null ? String(creds.apiKey).trim() : String(store.get('callApiKey', '') || '').trim();
+    let text;
+    if (relay) {
+      const headers = { 'Content-Type': 'application/json' };
+      if (relayKey) headers.Authorization = 'Bearer ' + relayKey;
+      text = await callHttp({ method: 'POST', url: relayEndpoint(relay), headers, data: JSON.stringify({ url: url, body: body }) });
+    } else if (apiKey) {
+      text = await callHttp({
+        method: 'POST', url: url,
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+        data: JSON.stringify(body),
+      });
+    } else throw new Error('没有填写中转地址或 OpenAI Key');
+    let data;
+    try { data = JSON.parse(text); } catch (e) { throw new Error('临时密钥不是 JSON'); }
+    const token = data.value || (data.client_secret && data.client_secret.value) || '';
+    if (!token) {
+      const err = data.error;
+      throw new Error((err && (err.message || (typeof err === 'string' ? err : ''))) || '没有拿到临时通话密钥');
+    }
+    return token;
+  }
+  async function mintCallTry(url, bodies, creds) {
+    let last;
+    for (let i = 0; i < bodies.length; i++) {
+      try { return await mintCallSecret(url, bodies[i], creds); } catch (e) { last = e; }
+    }
+    throw last || new Error('申请临时密钥失败');
+  }
+
+  function waitIce(pc, ms) {
+    if (pc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; try { pc.removeEventListener('icegatheringstatechange', on); } catch (e) {} resolve(); };
+      const on = () => { if (pc.iceGatheringState === 'complete') finish(); };
+      try { pc.addEventListener('icegatheringstatechange', on); } catch (e) { finish(); return; }
+      setTimeout(finish, ms);
+    });
+  }
+  function keepCallSink(stream, slot) {
+    try {
+      const id = slot === 'in' ? 'wat-call-sink-in' : 'wat-call-sink-out';
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('audio');
+        el.id = id;
+        el.autoplay = true;
+        el.muted = true;
+        el.setAttribute('playsinline', '');
+        el.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
+        document.documentElement.appendChild(el);
+      }
+      el.srcObject = stream;
+      const p = el.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) { /* 静音播放失败时，WebAudio 仍会拉流 */ }
+  }
+  function handleOaiEvent(msg, onEvent) {
+    if (!msg || !msg.type) return;
+    const t = msg.type;
+    if (t === 'error') {
+      const err = msg.error || {};
+      onEvent({ type: 'error', message: err.message || err.code || '翻译服务报错' });
+      return;
+    }
+    const delta = typeof msg.delta === 'string' ? msg.delta : '';
+    const doneText = typeof msg.transcript === 'string' ? msg.transcript : (typeof msg.text === 'string' ? msg.text : '');
+    if (t === 'session.output_transcript.delta' || t === 'response.output_audio_transcript.delta' || t === 'response.audio_transcript.delta' || t === 'response.output_text.delta' || t === 'response.text.delta') {
+      if (delta) onEvent({ type: 'transcript', role: 'translated', text: delta, partial: true });
+      return;
+    }
+    if (t === 'session.input_transcript.delta' || t === 'conversation.item.input_audio_transcription.delta') {
+      if (delta) onEvent({ type: 'transcript', role: 'source', text: delta, partial: true });
+      return;
+    }
+    if (t === 'conversation.item.input_audio_transcription.completed' || t === 'session.input_transcript.done') {
+      onEvent({ type: 'transcript', role: 'source', text: doneText || delta, partial: false });
+      return;
+    }
+    if (t === 'session.output_transcript.done' || t === 'response.output_audio_transcript.done' || t === 'response.audio_transcript.done') {
+      onEvent({ type: 'transcript', role: 'translated', text: doneText || delta, partial: false });
+    }
+  }
+  async function openCallWebRTC(opts) {
+    if (!rtcApi || typeof rtcApi.makeOwn !== 'function') throw new Error('通话钩子没装上，请刷新页面');
+    const pc = rtcApi.makeOwn();
+    const dc = pc.createDataChannel('oai-events');
+    const clone = opts.sourceTrack.clone();
+    const sender = pc.addTrack(clone);
+    let dead = false;
+    const pending = [];
+    const send = (obj) => {
+      const raw = JSON.stringify(obj);
+      if (dc.readyState === 'open') dc.send(raw);
+      else pending.push(raw);
+    };
+    dc.addEventListener('open', () => {
+      pending.splice(0).forEach((raw) => { try { dc.send(raw); } catch (e) {} });
+    });
+    dc.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handleOaiEvent(msg, opts.onEvent);
+    });
+    dc.addEventListener('close', () => { if (!dead) opts.onEvent({ type: 'close', message: '事件通道关闭' }); });
+    pc.addEventListener('track', (ev) => {
+      const stream = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
+      keepCallSink(stream, opts.sink || 'out');
+      try { opts.onEvent({ type: 'audio-track', stream: stream, track: ev.track }); } catch (e) {}
+    });
+    pc.addEventListener('connectionstatechange', () => {
+      if (dead) return;
+      const st = pc.connectionState;
+      if (st === 'connected') opts.onEvent({ type: 'open' });
+      if (st === 'failed') opts.onEvent({ type: 'error', message: '语音通道失败' });
+      if (st === 'disconnected') {
+        setTimeout(() => {
+          if (dead) return;
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') opts.onEvent({ type: 'error', message: '语音通道中断' });
+        }, 2000);
+      }
+    });
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitIce(pc, 1200);
+      const answer = await callHttp({
+        method: 'POST',
+        url: opts.callsUrl,
+        headers: { Authorization: 'Bearer ' + opts.token, 'Content-Type': 'application/sdp' },
+        data: pc.localDescription.sdp,
+      });
+      if (!answer || answer.charAt(0) === '{') throw new Error(String(answer || '没有 SDP').slice(0, 180));
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+    } catch (e) {
+      dead = true;
+      try { clone.stop(); } catch (e2) {}
+      try { pc.close(); } catch (e2) {}
+      throw e;
+    }
+    let currentClone = clone;
+    return {
+      send: send,
+      updateLanguage(lang) {
+        if (opts.kind === 'agent') {
+          send({ type: 'session.update', session: { instructions: agentInstructions(lang), audio: { input: { turn_detection: vadBody() } } } });
+        } else {
+          send({ type: 'session.update', session: { audio: { output: { language: lang } } } });
+        }
+      },
+      replaceSource(track) {
+        const next = track.clone();
+        const p = sender.replaceTrack(next);
+        const swap = () => { try { currentClone.stop(); } catch (e) {} currentClone = next; };
+        if (p && p.then) return p.then(swap);
+        swap();
+        return p;
+      },
+      close() {
+        if (dead) return;
+        dead = true;
+        try { if (dc.readyState === 'open') dc.send(JSON.stringify({ type: 'session.close' })); } catch (e) {}
+        try { dc.close(); } catch (e) {}
+        try { currentClone.stop(); } catch (e) {}
+        try { pc.close(); } catch (e) {}
+      },
+    };
+  }
+
+  async function startTranslate(ctx) {
+    const lang = ctx.lang === 'zh' ? 'zh' : (ctx.lang || 'en');
+    const terms = termList().slice(0, 20).join(', ');
+    const full = { session: { model: CALL_TRANSLATE_MODEL, audio: {
+      input: {
+        transcription: { model: CALL_WHISPER_MODEL, prompt: terms ? ('Proper nouns: ' + terms) : 'Car sales call.' },
+        noise_reduction: { type: ctx.direction === 'out' ? 'near_field' : 'far_field' },
+      },
+      output: { language: lang },
+    } } };
+    const plain = { session: { model: CALL_TRANSLATE_MODEL, audio: { output: { language: lang } } } };
+    const token = await mintCallTry('https://api.openai.com/v1/realtime/translations/client_secrets', [full, plain]);
+    const handle = await openCallWebRTC({
+      callsUrl: 'https://api.openai.com/v1/realtime/translations/calls',
+      token: token, sourceTrack: ctx.track, onEvent: ctx.onEvent, kind: 'translate', sink: ctx.direction === 'in' ? 'in' : 'out',
+    });
+    return handle;
+  }
+  async function startAgent(ctx) {
+    const lang = ctx.lang === 'zh' ? 'en' : (ctx.lang || 'en');
+    const full = { session: {
+      type: 'realtime', model: CALL_AGENT_MODEL, instructions: agentInstructions(lang),
+      audio: {
+        input: { transcription: { model: CALL_WHISPER_MODEL }, turn_detection: vadBody() },
+        output: { voice: CALL_AGENT_VOICE },
+      },
+    } };
+    const noVoice = { session: {
+      type: 'realtime', model: CALL_AGENT_MODEL, instructions: agentInstructions(lang),
+      audio: { input: { turn_detection: vadBody() } },
+    } };
+    const token = await mintCallTry('https://api.openai.com/v1/realtime/client_secrets', [full, noVoice]);
+    return openCallWebRTC({
+      callsUrl: 'https://api.openai.com/v1/realtime/calls',
+      token: token, sourceTrack: ctx.track, onEvent: ctx.onEvent, kind: 'agent', sink: 'out',
+    });
+  }
+  function attachCallVad(track, onSilence) {
+    if (!callAudio) return function () {};
+    let src;
+    try { src = callAudio.createMediaStreamSource(new MediaStream([track])); } catch (e) { return function () {}; }
+    const analyser = callAudio.createAnalyser();
+    analyser.fftSize = 1024;
+    src.connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    let speaking = false, silenceAt = 0, voicedAt = 0;
+    const timer = setInterval(() => {
+      try { analyser.getByteTimeDomainData(buf); } catch (e) { return; }
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) { const x = (buf[i] - 128) / 128; sum += x * x; }
+      const rms = Math.sqrt(sum / buf.length);
+      const now = Date.now();
+      if (rms > 0.02) {
+        if (!speaking) voicedAt = now;
+        speaking = true;
+        silenceAt = 0;
+      } else if (speaking) {
+        if (!silenceAt) silenceAt = now;
+        if (now - silenceAt >= callSilenceMs() && now - voicedAt > 240) {
+          speaking = false;
+          silenceAt = 0;
+          try { onSilence(); } catch (e) {}
+        }
+      }
+    }, 80);
+    return function () { clearInterval(timer); try { src.disconnect(); } catch (e) {} };
+  }
+  async function startTranscribe(ctx) {
+    const keywords = termList().slice(0, 20);
+    const full = { session: { type: 'transcription', audio: { input: {
+      transcription: { model: CALL_TRANSCRIBE_MODEL, prompt: transcribePrompt(), keywords: keywords, languages: ['en', 'es', 'fr'], delay: 'low' },
+      turn_detection: null,
+    } } } };
+    const plain = { session: { type: 'transcription', audio: { input: {
+      transcription: { model: CALL_TRANSCRIBE_MODEL, languages: ['en', 'es', 'fr'] },
+      turn_detection: null,
+    } } } };
+    const token = await mintCallTry('https://api.openai.com/v1/realtime/client_secrets', [full, plain]);
+    const handle = await openCallWebRTC({
+      callsUrl: 'https://api.openai.com/v1/realtime/calls',
+      token: token, sourceTrack: ctx.track, onEvent: ctx.onEvent, kind: 'transcribe', sink: 'in',
+    });
+    const stopVad = attachCallVad(ctx.track, () => handle.send({ type: 'input_audio_buffer.commit' }));
+    const orig = handle.close;
+    handle.close = function () { stopVad(); orig(); };
+    return handle;
+  }
+  function startFake(ctx) {
+    let osc = null, closed = false;
+    const handle = {
+      updateLanguage(lang) { ctx.onEvent({ type: 'transcript', role: 'translated', text: 'LANG ' + lang, partial: false }); },
+      replaceSource() {},
+      fail() { if (!closed) ctx.onEvent({ type: 'error', message: '测试：翻译断开' }); },
+      close() { closed = true; try { if (osc) osc.stop(); } catch (e) {} },
+    };
+    setTimeout(() => {
+      if (closed) return;
+      try {
+        const AC = pageWin().AudioContext || pageWin().webkitAudioContext;
+        const ctxAudio = callAudio || new AC();
+        const dest = ctxAudio.createMediaStreamDestination();
+        osc = ctxAudio.createOscillator();
+        osc.frequency.value = 880;
+        osc.connect(dest);
+        osc.start();
+        ctx.onEvent({ type: 'audio-track', stream: dest.stream, track: dest.stream.getAudioTracks()[0] });
+        ctx.onEvent({ type: 'open' });
+      } catch (e) {
+        ctx.onEvent({ type: 'error', message: e.message || 'fake 音频失败' });
+      }
+    }, 30);
+    return Promise.resolve(handle);
+  }
+
+  const CALL_PROVIDERS = {
+    'openai-translate': { label: '同声传译（最快，术语表不保证）', dirs: 'both', start: startTranslate },
+    'openai-agent': { label: '带术语表（稍慢，句尾停顿后再开口）', dirs: 'out', start: startAgent },
+    'openai-transcribe': { label: '转写再翻译（更省，适合对方字幕）', dirs: 'in', start: startTranscribe },
+  };
+  try {
+    const loc0 = pageWin().location;
+    if (loc0 && (loc0.protocol === 'file:' || loc0.hostname === 'localhost')) CALL_PROVIDERS.fake = { label: 'fake', dirs: 'both', start: startFake };
+  } catch (e) { /* ignore */ }
+
+  function setCallStatus(text) {
+    callStatusText = text || '';
+    paintCall();
+  }
+  function callLine(key) {
+    const rows = (callHist[key] || []).slice(-3);
+    const partial = (callBucket[key] || '').trim();
+    if (partial) rows.push(partial);
+    return rows.join('\n');
+  }
+  function paintCall() {
+    const box = document.getElementById('wat-callbox');
+    if (!box) return;
+    const st = document.getElementById('wat-call-st');
+    if (st) st.textContent = callStatusText;
+    const showOrig = store.get('callShowOrig', true) !== false;
+    const z = document.getElementById('wat-call-in-zh');
+    const src = document.getElementById('wat-call-in-src');
+    const out = document.getElementById('wat-call-out');
+    const me = document.getElementById('wat-call-me');
+    if (z) z.textContent = callLine('inZh');
+    if (src) src.textContent = showOrig && callLine('inSrc') ? ('客户原文：' + callLine('inSrc')) : '';
+    if (out) out.textContent = callLine('out') ? ('客户听到：' + callLine('out')) : '';
+    if (me) me.textContent = showOrig && callLine('me') ? ('我方识别：' + callLine('me')) : '';
+    const det = document.getElementById('wat-call-det');
+    if (det) det.textContent = callDetected ? ('识别到 ' + callLangName(callDetected)) : '还没听出客户的语言';
+    const sel = document.getElementById('wat-call-lang');
+    if (sel && document.activeElement !== sel) sel.value = store.get('callLangMode', 'auto') || 'auto';
+  }
+  function ensureCallBox() {
+    if (document.getElementById('wat-callbox')) return;
+    const box = document.createElement('div');
+    box.id = 'wat-callbox';
+    box.style.display = 'none';
+    box.innerHTML = '<div class="hd"><b>通话同传</b><span class="st" id="wat-call-st"></span></div>' +
+      '<div class="tip">请戴耳机。用扬声器外放时，放出的声音会被麦克风收进去，再翻一遍。</div>' +
+      '<div class="row"><span class="lab">客户听到的语言</span><select id="wat-call-lang">' +
+      '<option value="auto">自动（跟着客户）</option><option value="en">英语</option><option value="es">西语</option><option value="fr">法语</option>' +
+      '</select><span class="lab" id="wat-call-det"></span></div>' +
+      '<div class="lab">对方说的（中文）</div><div class="sub" id="wat-call-in-zh"></div>' +
+      '<div class="orig" id="wat-call-in-src"></div>' +
+      '<div class="lab">您说的，译给客户</div><div class="out" id="wat-call-out"></div>' +
+      '<div class="orig" id="wat-call-me"></div>';
+    document.documentElement.appendChild(box);
+    const sel = box.querySelector('#wat-call-lang');
+    sel.addEventListener('change', () => {
+      store.set('callLangMode', sel.value);
+      pushOutLang(callTargetLang());
+      if (callPhase === 'live') setCallStatus(liveCallStatus());
+      else paintCall();
+    });
+  }
+  function showCallBox() { ensureCallBox(); const box = document.getElementById('wat-callbox'); if (box) box.style.display = 'block'; paintCall(); }
+  function hideCallBox() { const box = document.getElementById('wat-callbox'); if (box) box.style.display = 'none'; }
+
+  function acceptCallLang(lang, strong) {
+    lang = String(lang || '').toLowerCase().split('-')[0];
+    if (lang === 'zh-cn' || lang === 'cmn' || lang === 'zh-hans') lang = 'zh';
+    if (['en', 'es', 'fr', 'zh'].indexOf(lang) < 0) return;
+    if (strong) callStreak = { lang: lang, n: 2 };
+    else if (lang === callStreak.lang) callStreak.n++;
+    else callStreak = { lang: lang, n: 1 };
+    if (callStreak.n >= 2 && lang !== callDetected) {
+      callDetected = lang;
+      paintCall();
+      if ((store.get('callLangMode', 'auto') || 'auto') === 'auto') pushOutLang(callTargetLang());
+    }
+  }
+  function noteHeard(chunk) {
+    if (!chunk) return;
+    callHeard = (callHeard + chunk).slice(-500);
+    const lang = detectLang(callHeard);
+    if (lang) acceptCallLang(lang, false);
+  }
+  function pushCallHist(key, text) {
+    text = String(text || '').trim();
+    if (!text) return;
+    const arr = callHist[key];
+    if (arr[arr.length - 1] === text) return;
+    arr.push(text.length > 180 ? text.slice(-180) : text);
+    if (arr.length > 4) arr.shift();
+  }
+  function commitCallText(key) {
+    const text = (callBucket[key] || '').trim();
+    callBucket[key] = '';
+    if (text) pushCallHist(key, text);
+    paintCall();
+    if (key === 'inSrc' && callInId() === 'openai-transcribe' && text) translateIncomingLine(text);
+  }
+  function takeCallText(key, ev) {
+    if (ev.partial) {
+      callBucket[key] = (callBucket[key] || '') + (ev.text || '');
+      if (/[。！？!?\n]\s*$/.test(callBucket[key]) || callBucket[key].length > 120) commitCallText(key);
+      else paintCall();
+    } else {
+      if (ev.text) callBucket[key] = ev.text;
+      commitCallText(key);
+    }
+    // 只根据客户的话判断语言。我方识别是中文，不能拿来把目标语言改成中文。
+    if (key === 'inSrc') noteHeard(ev.text || '');
+  }
+  async function translateIncomingLine(text) {
+    const seq = ++callMtSeq;
+    try {
+      const r = await translate(text, 'zh');
+      if (seq !== callMtSeq) return;
+      if (r && r.from) acceptCallLang(r.from, true);
+      pushCallHist('inZh', (r && r.text) || '');
+      paintCall();
+    } catch (e) {
+      if (seq !== callMtSeq) return;
+      pushCallHist('inZh', '（这句没译出来）');
+      paintCall();
+    }
+  }
+
+  function rtpProto() {
+    const C = pageWin().RTCRtpSender;
+    return C && C.prototype;
+  }
+  function nativeSetTrack(sender, track) {
+    const fn = callNativeReplace || sender.replaceTrack;
+    return fn.call(sender, track);
+  }
+  function armCallReplace() {
+    const proto = rtpProto();
+    if (!proto || typeof proto.replaceTrack !== 'function' || callNativeReplace) return;
+    callNativeReplace = proto.replaceTrack;
+    proto.replaceTrack = function (track) {
+      try {
+        if (callEngaged && callManaged.has(this) && callMixed && track !== callMixed) {
+          const slot = callManaged.get(this);
+          if (!track) { slot.muted = true; return callNativeReplace.call(this, null); }
+          slot.muted = false;
+          slot.original = track;
+          try { buildCallGraph(track); } catch (e) {}
+          if (callOut && callOut.replaceSource) { try { callOut.replaceSource(track); } catch (e) {} }
+          return callNativeReplace.call(this, callMixed);
+        }
+      } catch (e) { /* 钩子出错就用原来的，避免没声音 */ }
+      return callNativeReplace.apply(this, arguments);
+    };
+  }
+  function disarmCallReplace() {
+    const proto = rtpProto();
+    if (proto && callNativeReplace) proto.replaceTrack = callNativeReplace;
+    callNativeReplace = null;
+  }
+  function buildCallGraph(track) {
+    const AC = pageWin().AudioContext || pageWin().webkitAudioContext;
+    if (!AC) throw new Error('这个浏览器没有音频接口');
+    if (!callAudio || callAudio.state === 'closed') callAudio = new AC();
+    if (!callDuck) callDuck = callAudio.createGain();
+    if (!callTtsGain) callTtsGain = callAudio.createGain();
+    if (!callDest) {
+      callDest = callAudio.createMediaStreamDestination();
+      callDuck.connect(callDest);
+      callTtsGain.connect(callDest);
+      callDuck.gain.value = 1;
+      callTtsGain.gain.value = 1;
+      callMixed = callDest.stream.getAudioTracks()[0];
+      callMixed.addEventListener('ended', () => {
+        if (callEngaged) deliverOriginal(false, '混音中断，已改回您的原声');
+      });
+    }
+    if (callMicNode) { try { callMicNode.disconnect(); } catch (e) {} }
+    callMicNode = callAudio.createMediaStreamSource(new MediaStream([track]));
+    callMicNode.connect(callDuck);
+  }
+  function applyCallDuck() {
+    if (!callDuck || !callAudio) return;
+    const v = (callEngaged && !callFallback) ? callDuckGain() : 1;
+    try { callDuck.gain.setTargetAtTime(v, callAudio.currentTime, 0.04); } catch (e) { callDuck.gain.value = v; }
+  }
+  function connectCallTts(stream) {
+    if (!callAudio || !callTtsGain) return;
+    if (callTtsNode) { try { callTtsNode.disconnect(); } catch (e) {} }
+    try {
+      callTtsNode = callAudio.createMediaStreamSource(stream);
+      callTtsNode.connect(callTtsGain);
+    } catch (e) { /* 译文声音接不上时，下面的回退会放原声 */ }
+  }
+  function deliverOriginal(silent, message) {
+    callFallback = true;
+    callEngaged = false;
+    applyCallDuck();
+    callSlots.forEach((s) => {
+      if (!s.original) return;
+      try {
+        if (s.sender.track !== s.original) nativeSetTrack(s.sender, s.original);
+      } catch (e) {}
+    });
+    if (message) setCallStatus(message);
+    if (!silent && message && !callTold) {
+      callTold = true;
+      try { toast(message, true); } catch (e) {}
+    }
+  }
+  function deliverMix() {
+    if (callTargetLang() === 'zh') {
+      deliverOriginal(true, '对方在说中文，已直接送出您的原声');
+      return;
+    }
+    if (!callMixed) {
+      setCallStatus('混音没有建起来，客户听到的是您的原声');
+      return;
+    }
+    callEngaged = true;
+    callFallback = false;
+    callTold = false;
+    callSlots.forEach((s) => {
+      if (s.muted || !s.original) return;
+      try {
+        const p = nativeSetTrack(s.sender, callMixed);
+        if (p && p.catch) p.catch(() => deliverOriginal(false, '没法替换通话声音，已保持您的原声'));
+      } catch (e) {
+        deliverOriginal(false, '没法替换通话声音，已保持您的原声');
+      }
+    });
+    applyCallDuck();
+  }
+  function liveCallStatus() {
+    const id = callOutId();
+    const how = id === 'openai-agent' ? '带术语表' : id === 'openai-translate' ? '同声传译' : id === 'fake' ? '测试' : id;
+    if (!callSlots.length) return '只在出字幕（没有找到送出的麦克风）';
+    return '同传中 · 客户听到' + callLangName(callTargetLang()) + ' · ' + how;
+  }
+  async function ensureCallRunning() {
+    if (!callAudio) return false;
+    if (callAudio.state === 'suspended') { try { await callAudio.resume(); } catch (e) {} }
+    return callAudio.state === 'running';
+  }
+  function pushOutLang(lang) {
+    if (!callOut) return;
+    if (lang === 'zh') {
+      deliverOriginal(true, '对方在说中文，已直接送出您的原声');
+      if (callOut.updateLanguage) callOut.updateLanguage('zh');
+      return;
+    }
+    if (callOut.updateLanguage) callOut.updateLanguage(lang);
+    if (callAudio && callMixed && !callFallback) deliverMix();
+    if (callPhase === 'live') setCallStatus(liveCallStatus());
+  }
+  function onOutEvent(ev) {
+    if (!ev) return;
+    if (ev.type === 'open') {
+      callTries.out = 0;
+      const epoch = callOutEpoch;
+      ensureCallRunning().then((ok) => {
+        if (epoch !== callOutEpoch || callClosing) return;
+        if (!ok) {
+          deliverOriginal(true);
+          setCallStatus('浏览器暂停了音频。请用鼠标点一下页面，再说一句话。');
+          const resume = () => {
+            document.removeEventListener('pointerdown', resume, true);
+            ensureCallRunning().then((ok2) => {
+              if (epoch !== callOutEpoch || callClosing) return;
+              if (ok2 && callTargetLang() !== 'zh') { deliverMix(); setCallStatus(liveCallStatus()); }
+            });
+          };
+          document.addEventListener('pointerdown', resume, true);
+          return;
+        }
+        if (callTargetLang() === 'zh') { deliverOriginal(true, '对方在说中文，已直接送出您的原声'); return; }
+        deliverMix();
+        setCallStatus(liveCallStatus());
+        pushOutLang(callTargetLang());
+      });
+      return;
+    }
+    if (ev.type === 'audio-track' && ev.stream) { connectCallTts(ev.stream); return; }
+    if (ev.type === 'transcript') {
+      if (ev.role === 'translated') takeCallText('out', ev);
+      else takeCallText('me', ev);
+      return;
+    }
+    if (ev.type === 'error' || ev.type === 'close') {
+      if (callClosing) return;
+      callOutEpoch++;
+      deliverOriginal(false, '翻译中断（' + (ev.message || '连接断开') + '），客户现在听到的是您的原声');
+      scheduleCallReconnect('out');
+    }
+  }
+  function onInEvent(ev) {
+    if (!ev || callClosing) return;
+    if (ev.type === 'open') { callTries.in = 0; if (callPhase === 'live') setCallStatus(liveCallStatus()); return; }
+    if (ev.type === 'audio-track') return;
+    if (ev.type === 'transcript') {
+      if (callInId() === 'openai-transcribe') takeCallText('inSrc', ev);
+      else if (ev.role === 'translated') takeCallText('inZh', ev);
+      else takeCallText('inSrc', ev);
+      return;
+    }
+    if (ev.type === 'error' || ev.type === 'close') {
+      setCallStatus('对方字幕中断：' + (ev.message || '连接断开') + '。您说的翻译不受影响的话，客户仍听得到。');
+      scheduleCallReconnect('in');
+    }
+  }
+  function collectCallSenders(pc) {
+    const list = [];
+    let found = [];
+    try { found = pc.getTransceivers ? pc.getTransceivers() : []; } catch (e) { found = []; }
+    found.forEach((t) => {
+      const sender = t && t.sender;
+      if (!sender) return;
+      const kind = (sender.track && sender.track.kind) || (t.receiver && t.receiver.track && t.receiver.track.kind);
+      if (kind !== 'audio' || !sender.track) return;
+      list.push({ sender: sender, original: sender.track, muted: false });
+    });
+    if (!list.length && pc.getSenders) {
+      try {
+        pc.getSenders().forEach((sender) => {
+          if (sender.track && sender.track.kind === 'audio') list.push({ sender: sender, original: sender.track, muted: false });
+        });
+      } catch (e) {}
+    }
+    return list;
+  }
+  function remoteCallTrack(pc) {
+    try {
+      const rs = pc.getReceivers ? pc.getReceivers() : [];
+      for (let i = 0; i < rs.length; i++) {
+        const tr = rs[i].track;
+        if (tr && tr.kind === 'audio' && tr.readyState === 'live') return tr;
+      }
+    } catch (e) {}
+    return null;
+  }
+  async function recoverCallMic() {
+    if (callLastMic && callLastMic.readyState === 'live') return callLastMic;
+    const gum = rtcApi && rtcApi.rawGetUserMedia;
+    if (typeof gum !== 'function') return null;
+    try {
+      const stream = await gum({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+      const t = stream.getAudioTracks()[0];
+      if (t) callLastMic = t;
+      return t || null;
+    } catch (e) { return null; }
+  }
+  async function startCallOut() {
+    const my = ++callOutGen;
+    if (callOut) { const old = callOut; callOut = null; try { old.close(); } catch (e) {} }
+    let track = callSlots[0] && callSlots[0].original;
+    if (!track || track.readyState === 'ended') track = await recoverCallMic();
+    if (my !== callOutGen) return;
+    if (!track) {
+      setCallStatus('通话里没有麦克风轨道，只能准备字幕。请允许网页使用麦克风。');
+      return;
+    }
+    if (callSlots[0]) callSlots[0].original = track;
+    try { buildCallGraph(track); } catch (e) {
+      setCallStatus('音频初始化失败（' + e.message + '）。客户听到的是您的原声。');
+      return;
+    }
+    const prov = CALL_PROVIDERS[callOutId()];
+    if (!prov || prov.dirs === 'in') { setCallStatus('我方语音引擎不可用'); return; }
+    const lang = callTargetLang();
+    try {
+      const handle = await prov.start({
+        direction: 'out',
+        track: track,
+        lang: lang === 'zh' ? 'en' : lang,
+        onEvent: (ev) => { if (my === callOutGen) onOutEvent(ev); },
+      });
+      if (my !== callOutGen) { try { handle.close(); } catch (e) {} return; }
+      callOut = handle;
+    } catch (e) {
+      if (my !== callOutGen) return;
+      deliverOriginal(false, '翻译没连上（' + e.message + '），客户听到的是您的原声');
+      scheduleCallReconnect('out');
+    }
+  }
+  async function startCallIn() {
+    const my = ++callInGen;
+    if (callIn) { const old = callIn; callIn = null; try { old.close(); } catch (e) {} }
+    const track = callActivePc ? remoteCallTrack(callActivePc) : null;
+    if (!track) return;
+    const prov = CALL_PROVIDERS[callInId()];
+    if (!prov || prov.dirs === 'out') return;
+    callInStarting = true;
+    try {
+      const handle = await prov.start({
+        direction: 'in',
+        track: track,
+        lang: 'zh',
+        onEvent: (ev) => { if (my === callInGen) onInEvent(ev); },
+      });
+      if (my !== callInGen) { try { handle.close(); } catch (e) {} return; }
+      callIn = handle;
+    } catch (e) {
+      if (my !== callInGen) return;
+      setCallStatus('对方字幕没连上（' + e.message + '）。您的声音仍按原样送出，直到我方翻译连上。');
+      scheduleCallReconnect('in');
+    } finally {
+      if (my === callInGen) callInStarting = false;
+    }
+  }
+  function scheduleCallReconnect(dir) {
+    const id = dir === 'out' ? callOutId() : callInId();
+    if (id === 'fake') return;
+    if (!store.get('callOn', false) || !callActivePc || callClosing) return;
+    if (callTimers[dir]) return;
+    if (callTries[dir] >= 3) {
+      if (dir === 'out') setCallStatus('翻译多次没连上，已保持您的原声。关掉「通话同传」再打开可以重试。');
+      return;
+    }
+    callTries[dir]++;
+    const n = callTries[dir];
+    callTimers[dir] = setTimeout(() => {
+      callTimers[dir] = 0;
+      if (!store.get('callOn', false) || !callActivePc || callClosing) return;
+      const p = dir === 'out' ? startCallOut() : startCallIn();
+      Promise.resolve(p).catch(() => {});
+    }, 700 * n);
+  }
+  function clearCallCaptions() {
+    callHist.inZh = []; callHist.inSrc = []; callHist.out = []; callHist.me = [];
+    callBucket.inZh = ''; callBucket.inSrc = ''; callBucket.out = ''; callBucket.me = '';
+    callHeard = '';
+    callDetected = '';
+    callStreak = { lang: '', n: 0 };
+    callMtSeq++;
+  }
+  function shutdownCall(why) {
+    callClosing = true;
+    clearTimeout(callTimers.out); clearTimeout(callTimers.in);
+    callTimers = { out: 0, in: 0 };
+    callTries = { out: 0, in: 0 };
+    callOutGen++; callInGen++;
+    if (callOut) { try { callOut.close(); } catch (e) {} callOut = null; }
+    if (callIn) { try { callIn.close(); } catch (e) {} callIn = null; }
+    deliverOriginal(true);
+    disarmCallReplace();
+    callSlots.forEach((s) => { try { callManaged.delete(s.sender); } catch (e) {} });
+    callSlots = [];
+    callManaged = new WeakMap();
+    if (callMicNode) { try { callMicNode.disconnect(); } catch (e) {} }
+    if (callTtsNode) { try { callTtsNode.disconnect(); } catch (e) {} }
+    callMicNode = null; callTtsNode = null;
+    if (callAudio && callAudio.state !== 'closed') { try { callAudio.close(); } catch (e) {} }
+    callAudio = null; callDest = null; callDuck = null; callTtsGain = null; callMixed = null;
+    callActivePc = null;
+    callEngaged = false;
+    callFallback = false;
+    callInStarting = false;
+    callStarting = false;
+    callPhase = 'idle';
+    if (why) setCallStatus(why);
+    callClosing = false;
+  }
+  async function beginCall(pc) {
+    if (callStarting) return;
+    callStarting = true;
+    callPhase = 'starting';
+    callActivePc = pc;
+    callClosing = false;
+    clearCallCaptions();
+    try {
+      armCallReplace();
+      callSlots = collectCallSenders(pc);
+      callSlots.forEach((s) => callManaged.set(s.sender, s));
+      const mic = (callSlots[0] && callSlots[0].original) || callLastMic;
+      if (mic) { try { buildCallGraph(mic); } catch (e) { setCallStatus('音频初始化失败：' + e.message + '。对方仍听到您的原声。'); } }
+      callPhase = 'live';
+      setCallStatus('正在连接翻译…');
+      await startCallOut();
+      await startCallIn();
+    } finally {
+      callStarting = false;
+    }
+  }
+  function findCallPc() {
+    if (!rtcApi) return null;
+    let best = null;
+    rtcApi.pcs.forEach((pc) => {
+      if (rtcApi.own && rtcApi.own.has(pc)) return;
+      let st = '';
+      try { st = pc.connectionState || pc.iceConnectionState || ''; } catch (e) { return; }
+      if (st !== 'connected' && st !== 'connecting') return;
+      let audio = false;
+      try {
+        const ts = pc.getTransceivers ? pc.getTransceivers() : [];
+        audio = ts.some((t) => {
+          const k = (t.sender && t.sender.track && t.sender.track.kind) || (t.receiver && t.receiver.track && t.receiver.track.kind);
+          return k === 'audio';
+        });
+        if (!audio && pc.getSenders) audio = pc.getSenders().some((s) => s.track && s.track.kind === 'audio');
+        if (!audio && pc.getReceivers) audio = pc.getReceivers().some((r) => r.track && r.track.kind === 'audio');
+      } catch (e) { audio = false; }
+      if (audio) best = pc;
+    });
+    return best;
+  }
+  function maintainCall() {
+    if (!callActivePc || callStarting) return;
+    if (callEngaged && callMixed) {
+      callSlots.forEach((s) => {
+        const cur = s.sender.track;
+        if (!cur) { s.muted = true; return; }
+        s.muted = false;
+        if (cur !== callMixed && cur.readyState === 'live' && cur !== s.original) {
+          s.original = cur;
+          try { buildCallGraph(cur); } catch (e) {}
+          if (callOut && callOut.replaceSource) { try { callOut.replaceSource(cur); } catch (e) {} }
+        }
+        if (s.sender.track !== callMixed) {
+          try { nativeSetTrack(s.sender, callMixed); } catch (e) {}
+        }
+      });
+    }
+    if (!callIn && !callInStarting) {
+      const rt = remoteCallTrack(callActivePc);
+      if (rt) startCallIn();
+    }
+  }
+  function callTick() {
+    try {
+      if (rtcApi) {
+        rtcApi.pcs.forEach((pc) => {
+          try { if (pc.connectionState === 'closed') rtcApi.pcs.delete(pc); } catch (e) { rtcApi.pcs.delete(pc); }
+        });
+      }
+      const on = !!store.get('callOn', false);
+      const box = document.getElementById('wat-call');
+      if (box && document.activeElement !== box && box.checked !== on) box.checked = on;
+      if (!on) {
+        if (callActivePc || callPhase === 'live' || callPhase === 'starting' || callEngaged) shutdownCall('');
+        hideCallBox();
+        if (rtcApi) rtcApi.onMic = null;
+        return;
+      }
+      showCallBox();
+      if (!rtcApi) {
+        setCallStatus('没能钩住浏览器的通话接口。请刷新 WhatsApp 后再打开。文字翻译不受影响。');
+        return;
+      }
+      rtcApi.onMic = (stream) => {
+        try {
+          const t = stream.getAudioTracks && stream.getAudioTracks()[0];
+          if (t) callLastMic = t;
+        } catch (e) {}
+      };
+      rtcApi.onRemoteTrack = () => { if (callActivePc && !callIn && !callInStarting) startCallIn(); };
+      if (!callHasCreds()) {
+        if (callActivePc) shutdownCall('');
+        setCallStatus('请先在 ⚙ 设置 → 通话同传 里填写中转地址或 OpenAI Key。没配好之前，对方听到的是您的原声。');
+        return;
+      }
+      let pc = null;
+      if (callForcedPc) {
+        try { if (callForcedPc.connectionState !== 'closed') pc = callForcedPc; } catch (e) { pc = callForcedPc; }
+      }
+      if (!pc) pc = findCallPc();
+      if (!pc) {
+        if (callActivePc) shutdownCall('通话已结束');
+        setCallStatus('未检测到 WhatsApp 通话。请用网页版的语音通话（不是在手机上打）。如果这个账号没有网页通话，这里会一直这样。');
+        return;
+      }
+      if (pc !== callActivePc) {
+        if (callActivePc) shutdownCall('');
+        beginCall(pc);
+        return;
+      }
+      maintainCall();
+    } catch (e) { /* 通话模块出错不能弄坏文字翻译 */ }
+  }
+  function onCallSettingsSaved() {
+    applyCallDuck();
+    if (callActivePc && store.get('callOn', false)) {
+      const pc = callActivePc;
+      const forced = callForcedPc;
+      shutdownCall('正在按新设置重连…');
+      callForcedPc = forced;
+      beginCall(pc);
+    }
+  }
+  function callState() {
+    const slot = callSlots[0];
+    let overlay = '';
+    const box = document.getElementById('wat-callbox');
+    if (box && box.style.display !== 'none') overlay = box.innerText || '';
+    return {
+      hooked: !!(rtcApi && rtcApi.hooked),
+      enabled: !!store.get('callOn', false),
+      phase: callPhase,
+      status: callStatusText,
+      target: callTargetLang(),
+      detected: callDetected,
+      fallback: !!callFallback,
+      engaged: !!callEngaged,
+      duck: callDuckGain(),
+      senderTrackId: slot && slot.sender.track ? slot.sender.track.id : '',
+      originalTrackId: slot && slot.original ? slot.original.id : '',
+      mixed: !!(slot && callMixed && slot.sender.track === callMixed),
+      overlay: overlay,
+    };
+  }
+  function attachCallForTest(pc) { callForcedPc = pc; callTick(); }
+  function failCallOut() { if (callOut && callOut.fail) callOut.fail(); }
+  function setCallOn(v) {
+    store.set('callOn', !!v);
+    const box = document.getElementById('wat-call');
+    if (box) box.checked = !!v;
+    callTick();
+  }
+
+  function callSettingsSection() {
+    const relayIn = h('input', { type: 'text', id: 'wat-call-relay', placeholder: 'https://你的服务器/session', autocomplete: 'off' });
+    relayIn.value = store.get('callRelay', '') || '';
+    const relayKeyIn = h('input', { type: 'password', id: 'wat-call-relay-key', placeholder: '跟服务器上的 RELAY_KEY 一致', autocomplete: 'off' });
+    relayKeyIn.value = store.get('callRelayKey', '') || '';
+    const keyIn = h('input', { type: 'password', id: 'wat-call-key', placeholder: 'sk-…（没有中转时才填）', autocomplete: 'off' });
+    keyIn.value = store.get('callApiKey', '') || '';
+    const outSel = h('select', { id: 'wat-call-out', class: 'pi-in' });
+    const inSel = h('select', { id: 'wat-call-in', class: 'pi-in' });
+    Object.keys(CALL_PROVIDERS).forEach((id) => {
+      if (id === 'fake') return;
+      const p = CALL_PROVIDERS[id];
+      if (p.dirs !== 'in') outSel.appendChild(h('option', { value: id }, p.label));
+      if (p.dirs !== 'out') inSel.appendChild(h('option', { value: id }, p.label));
+    });
+    outSel.value = store.get('callOutProvider', 'openai-translate') || 'openai-translate';
+    inSel.value = store.get('callInProvider', 'openai-transcribe') || 'openai-transcribe';
+    const silenceIn = h('input', { type: 'number', id: 'wat-call-silence', min: '200', max: '800', step: '50' });
+    silenceIn.value = String(callSilenceMs());
+    const duckIn = h('input', { type: 'number', id: 'wat-call-duck', min: '0', max: '100', step: '5' });
+    duckIn.value = String(Math.round(callDuckGain() * 100));
+    const showIn = h('input', { type: 'checkbox', id: 'wat-call-orig' });
+    showIn.checked = store.get('callShowOrig', true) !== false;
+    const termsIn = h('textarea', { id: 'wat-call-terms', rows: '4', placeholder: '每行一个专名，例如 Chery、RELY、R8、Tiggo、瑞虎' });
+    termsIn.value = store.get('callTerms', DEFAULT_CALL_TERMS);
+    const testBtn = h('button', { class: 'sec', type: 'button' }, '测试连接');
+    testBtn.onclick = async () => {
+      testBtn.disabled = true;
+      const old = testBtn.textContent;
+      testBtn.textContent = '测试中…';
+      try {
+        await mintCallTry('https://api.openai.com/v1/realtime/translations/client_secrets', [
+          { session: { model: CALL_TRANSLATE_MODEL, audio: { output: { language: 'es' } } } },
+        ], { relay: relayIn.value.trim(), relayKey: relayKeyIn.value.trim(), apiKey: keyIn.value.trim() });
+        toast('连接成功：已拿到临时通话密钥。真正打电话时还会再连一次语音通道。');
+      } catch (e) {
+        toast('连接失败：' + e.message, true);
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = old;
+      }
+    };
+    const sec = h('div', null,
+      h('div', { class: 'wp-muted', style: 'margin-top:8px' }, '默认关闭。打开后，只在 WhatsApp 网页语音通话里生效：您说中文，客户听到译好的英语 / 西语 / 法语；客户说的话在页面上显示中文字幕。客户不用装任何东西。请戴耳机，否则外放会被再次翻译。'),
+      h('div', { class: 'wp-muted' }, 'Key 不要写进脚本。推荐填你自己的中转地址（见仓库 call-relay，只负责换临时密钥，语音不经过它）。没有服务器时也可以把 OpenAI Key 填在下面，只存在这台浏览器里。'),
+      h('label', null, '中转地址'), relayIn,
+      h('label', null, '中转密钥（服务器上的 RELAY_KEY）'), relayKeyIn,
+      h('label', null, 'OpenAI API Key（填了中转就可以留空）'), keyIn,
+      h('div', { class: 'wp-btns' }, testBtn),
+      h('label', null, '我说话（译给客户听）'), outSel,
+      h('div', { class: 'wp-muted' }, '同声传译边说边出，延迟最低，但不能把术语表交给模型（车型名可能读错）。要强制 Chery、R8 这类译法，选「带术语表」，它会等一句说完（下面的停顿）再开口，大约慢半秒。'),
+      h('label', null, '对方说话（只给您看字幕）'), inSel,
+      h('div', { class: 'wp-muted' }, '对方字幕默认用更便宜的转写，再翻成中文。想更顺可以改成同声传译，费用大约翻倍。费用随官网变，大致：同声传译约 $0.034/分钟，转写约 $0.017/分钟。双方都开着同声传译时，一小时大约 4 美元。'),
+      h('label', null, '句尾停顿（毫秒，200–800，默认 400）'), silenceIn,
+      h('div', { class: 'wp-muted' }, '只影响「带术语表」和「转写再翻译」。300 更快但容易把一句话切断；600 更稳但更慢。同声传译不看这个数，它是边说边译。'),
+      h('label', null, '原声混入（0–100，0 表示客户只听到译文）'), duckIn,
+      h('div', { class: 'wp-muted' }, '15 左右是译文下面垫一层很小的您的原声。翻译服务一旦断开，会立刻改回 100% 原声，避免对方听成静音。'),
+      h('label', { class: 'ws-inline' }, showIn, ' 字幕里同时显示原文'),
+      h('label', null, '通话术语（每行一个专名；也会带上「基本设置」里的翻译术语表）'), termsIn,
+      h('div', { class: 'wp-muted' }, '术语写成「中文 = 英文 | 西语 | 法语」时，第三段法语只给通话用，不影响原来的文字翻译。'));
+    sec.save = () => {
+      store.set('callRelay', relayIn.value.trim());
+      store.set('callRelayKey', relayKeyIn.value.trim());
+      store.set('callApiKey', keyIn.value.trim());
+      if (outSel.value) store.set('callOutProvider', outSel.value);
+      if (inSel.value) store.set('callInProvider', inSel.value);
+      const silence = Number(silenceIn.value);
+      store.set('callSilenceMs', isFinite(silence) ? Math.round(Math.min(800, Math.max(200, silence))) : 400);
+      const duck = Number(duckIn.value);
+      store.set('callDuck', isFinite(duck) ? Math.round(Math.min(100, Math.max(0, duck))) : 15);
+      store.set('callShowOrig', !!showIn.checked);
+      store.set('callTerms', termsIn.value);
+      try { onCallSettingsSaved(); } catch (e) {}
+    };
+    return sec;
+  }
+
+  function bootCallFeature() {
+    const prevRefresh = ui.refresh;
+    ui.refresh = function () {
+      prevRefresh.call(ui);
+      const box = document.getElementById('wat-call');
+      if (box) box.checked = !!store.get('callOn', false);
+    };
+    const box = document.getElementById('wat-call');
+    if (box) box.addEventListener('change', () => { store.set('callOn', box.checked); callTick(); });
+    setInterval(callTick, 700);
+    try {
+      const loc = pageWin().location;
+      if (loc && (loc.protocol === 'file:' || loc.hostname === 'localhost')) {
+        pageWin().__WAT_CALL__ = {
+          detectLang: detectLang,
+          terms: termList,
+          state: callState,
+          attach: attachCallForTest,
+          failOut: failCallOut,
+          setOn: setCallOn,
+        };
+      }
+    } catch (e) { /* 正式页面不挂测试接口 */ }
+  }
+  try { bootCallFeature(); } catch (e) { /* 通话模块启动失败时，文字翻译照常 */ }
 
   /* ---------- 工具栏拖动 / 收起 ---------- */
   $('wat-handle').addEventListener('mousedown', (e) => {

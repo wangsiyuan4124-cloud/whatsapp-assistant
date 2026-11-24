@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.7.9**，一个文件，约 2100 行，没有构建步骤。
+当前版本：**v1.8.0**，一个文件，约 4200 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
 
 ## 2. 功能清单
 
@@ -25,7 +25,8 @@
 | AI 助手 | 右栏第二个标签页。**独立对话，和客户无关**（像豆包 / DeepSeek App），有新对话、历史、加宽、「📎 引用当前客户聊天」（只附在下一条提问）。纯文本回答；只有用户明确要回复客户时，才用【可发给客户】…【/可发给客户】标记附上可填入的回复。 |
 | PI 形式发票 | AI 从聊天提取 → 右栏表单（缺的标黄）→ 预览 → 生成 A4 PDF 加一张 JPG → 粘贴进 WhatsApp 发送预览（不会自动发送）。英文版和西语版，金额大写，编号 `PI-YYYYMMDD-NNN`，按客户存草稿。开票公司：BOUNDLESS AUTOMOTIVE LIMITED（無界汽車有限公司，香港）。 |
 | 发车型资料 | 右栏「🚗 发车型资料」（子页面）：选车型组（柴油 / 汽油 / EV，按聊天内容猜一个默认值）→ ① 介绍文字（「标准介绍」用资料包里的卖点；「AI 按客户需求写」挑和客户相关的卖点；「✎ 和 AI 改一改」进修改话术页，`openRefine` 的 `opts.back` 让「← 用这条，返回」/ 页头「← 返回」把草稿带回发车型资料页）→ 填入聊天；每个「聊天 | 车型组」的介绍、照片和视频选择、规格书选项记在 `catState`（刷新页面后清空）；② 点选照片；③ 规格书 PDF（英 / 西，可带 CIF 到港价，附一张 JPG 预览图）；④ 视频 → 一次粘贴进发送预览（不会自动发送）。规格书页眉的 logo：资料包根目录的 `logo*.png` 优先（导入时存进 `catalog.logo`），其次用 PI 设置里的 logo。资料包是本地文件夹（见第 10 节），在「设置 → 车型资料」导入：一个 `.json` + 根目录 `logo.png` + 按子文件夹名（如 `diesel+gasoline`、`ev`）分组的照片和视频；照片导入时压缩到 1600px JPG，照片视频存在 IndexedDB `wat-media`。CIF：按版本手动填的优先（用户填的就是含运费的到港价，不需要再填运费）；没填的才用 FOB + 每台运费 + 每台保险费。对外只出现 CIF，不出现 FOB。带价格时：规格书表格下方有一行说明「CIF 只含到港海运费和保险，不含进口关税、当地税费、港杂费和内陆运输」（英 / 西），标准介绍的价格行也带简短说明；车型参数和 CIF 价会加进所有 AI 提示词（`catalogContext`，不含 FOB），并要求 AI 报价时说明 CIF 不含哪些费用、不估落地价。 |
-| 设置 | ⚙ 打开，标签页：基本设置（DeepSeek Key、业务介绍、价格表与交易条款、分级标准、自动加入列表开关）、PI 发票（公司、银行、Logo、公章、默认条款）、话术库。 |
+| 设置 | ⚙ 打开，标签页：基本设置（DeepSeek Key、业务介绍、价格表与交易条款、分级标准、自动加入列表开关）、通话同传、PI 发票（公司、银行、Logo、公章、默认条款）、话术库。 |
+| 通话同传 | 默认关闭。打开后：网页语音通话里，客户的声音出中文字幕；Leo 的中文被译成客户的语言并合成语音，用 `replaceTrack` 送给对方，原声按音量垫在下面。翻译断开就放回原麦克风。说明见 README「通话同传」。可选中转在 `call-relay/`。 |
 
 ## 3. 代码结构（按文件里的分节注释）
 
@@ -37,13 +38,14 @@
 - **客户分析模块**：`baseContext(conv, chatName)`（传了 conv 才附相似回复）、`buildPrompt`、`callDeepSeek`（带重试和宽松 JSON 解析）、`applyLevelList`、`showPanel`、状态行 `setStatus` / `panelNotice`、`convFingerprint`、`renderResult`、`openRefine`、`anotherSuggestion`、AI 助手 `openAsk` / `renderHistory`、`analyzeCurrent`、`syncPanel`、设置面板 `openSettings(tab)`
 - **PI 模块**：`renderPiPage`（全部内联样式，794px 宽）、`makePdfFiles`（通用：html2canvas 生成图片，再用 jsPDF 生成 PDF，超过一页自动分页；`makePiFiles` 调它）、`attachToChat`、`extractPiFromChat`、`renderPiEditor`、`piSettingsSection`
 - **车型资料模块**：`catStore`、`cifOf`、`mediaDb`（IndexedDB）、`importCatalogFolder`、`catalogContext`、`renderSpecPage`（规格书，内联样式，表格要显式写字号）、`openCatalog` / `renderCatalogPanel`、`catalogSettingsSection`
+- **通话同传**（文件后部，工具栏拖动之前）：`installRtcHook`（文件最前面，document-start）、`detectLang` / `termList`、OpenAI Realtime 三个引擎、`beginCall` / `deliverMix` / `deliverOriginal`、设置页 `callSettingsSection`
 - 工具栏拖动、启动
 
-依赖：通过 `@require` 从 cdnjs 加载 html2canvas 1.4.1 和 jsPDF 2.5.1。`@connect` 允许访问谷歌翻译、微软翻译、api.deepseek.com。
+依赖：通过 `@require` 从 cdnjs 加载 html2canvas 1.4.1 和 jsPDF 2.5.1。`@connect` 允许访问谷歌翻译、微软翻译、api.deepseek.com、api.openai.com，以及 `*`（通话中转的域名事先不知道）。`MutationObserver` 要等 `document.body` 出现再挂，因为脚本现在从 document-start 跑。
 
 ### 存储（GM_setValue，只存在用户这台电脑的 Chrome 里）
 
-`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`myReplies`（你的回复样本，最多 800 条：`{at, chat, cust, zh?, sent, ai?, aiKept?, src: live|history}`）、`refineAsks`（修改要求，最多 200 条）、`styleProfile`（`{style, rules, at, n}`）、`catalog`（车型资料包，含 FOB）、`catPrice`（`{port, freight, insurance, override}`）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`。
+`dsKey`（API Key）、`glossary`（术语表）、`aiIn`（对方消息 AI 翻译开关）、`aiTrCache`（对方消息 AI 译文缓存）、`myReplies`（你的回复样本，最多 800 条：`{at, chat, cust, zh?, sent, ai?, aiKept?, src: live|history}`）、`refineAsks`（修改要求，最多 200 条）、`styleProfile`（`{style, rules, at, n}`）、`catalog`（车型资料包，含 FOB）、`catPrice`（`{port, freight, insurance, override}`）、`bizInfo`、`priceTable`、`gradeRules`、`autoLabel`、`playbook`、`analyses`（按聊天名，含 `fp` 指纹）、`aiChats` / `aiCurrent`、`piSeller`（公司、银行、logo 和公章的 dataURL）、`piDrafts`、`piRecords`、`piSeq`、`piWithImg`、`docked`、`panelWide`、`barPos`、`barMin`、`chatLangs`、`defaultLang`、`autoSend`、`autoIn`、`engine`（`ai` / `google` / `microsoft`，默认 `ai`；只影响发送翻译；接收翻译由 `aiIn` 控制）、`enabled`、`callOn`（通话同传，默认关）、`callRelay` / `callRelayKey` / `callApiKey`、`callOutProvider` / `callInProvider`、`callSilenceMs`、`callDuck`（0–100）、`callShowOrig`、`callTerms`、`callLangMode`（`auto` / `en` / `es` / `fr`）。
 
 **仓库是公开的**：代码里绝不能放 API Key、银行信息、公章或 Logo 图片。
 
@@ -69,6 +71,7 @@
 6. GitHub 的 raw 下载地址有大约 5 分钟缓存。发布后要确认 raw 地址拿到的已经是新版本号，再通知用户更新。
 7. AI 翻译时要忠实原文、保留人称（曾经把「Can I give you an estimate」翻成「能给我报价吗」）。
 8. 谷歌 / 微软是逐字直译，会出中式英语（例：「二手车」→ second-hand car，当地说 used car）。所以发送翻译默认用 AI，术语表兜底。
+9. 通话同传的钩子在功能关闭时也不能把音轨换掉。送给翻译服务的必须是原始麦克风，不能是已经混进译文的那条，否则会自己翻自己。翻译失败要 `replaceTrack` 回原麦克风。`t14` 覆盖这三件事。真 WhatsApp 通话这个测试环境打不了。
 
 ## 6. 产品决定和用户偏好
 
