@@ -1,7 +1,8 @@
 'use strict';
 
 const http = require('http');
-const { allowedTarget, createServer } = require('./server');
+const { allowedTarget, createServer, aliyunUpstreamUrl } = require('./server');
+const { acceptBrowser } = require('./wsutil');
 
 function assert(cond, msg) {
   if (!cond) { console.error('FAIL', msg); process.exitCode = 1; }
@@ -59,6 +60,50 @@ function once(server, method, path, headers, body) {
     assert(seen.length === 1 && seen[0].key === 'sk-test' && seen[0].model === 'gpt-realtime-translate', 'forwards openai key and body');
   } finally {
     await new Promise((r) => server.close(r));
+  }
+  assert(aliyunUpstreamUrl('ws-abc', 'qwen3.8-livetranslate-flash-realtime').indexOf('wss://ws-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=') === 0, 'beijing workspace url');
+  assert(!aliyunUpstreamUrl('bad host'), 'rejects workspace with spaces');
+
+  const upstream = http.createServer();
+  const seenAuth = [];
+  const seenMsg = [];
+  upstream.on('upgrade', (req, socket) => {
+    seenAuth.push(req.headers.authorization || '');
+    const peer = acceptBrowser(req, socket);
+    if (!peer) return;
+    peer.onFrame((text) => {
+      seenMsg.push(text);
+      peer.send(JSON.stringify({ type: 'session.created', echo: JSON.parse(text).type }));
+    });
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const relay = createServer({
+    relayKey: 'secret',
+    dashscopeKey: 'sk-aliyun',
+    aliyunUrl: 'ws://127.0.0.1:' + upstream.address().port + '/api-ws/v1/realtime?model=qwen3.8-livetranslate-flash-realtime',
+  });
+  await new Promise((r) => relay.listen(0, '127.0.0.1', r));
+  try {
+    const deniedWs = await new Promise((resolve) => {
+      const ws = new WebSocket('ws://127.0.0.1:' + relay.address().port + '/aliyun?k=wrong');
+      ws.onopen = () => resolve('open');
+      ws.onerror = () => resolve('error');
+      ws.onclose = () => resolve('close');
+    });
+    assert(deniedWs !== 'open', 'aliyun proxy rejects bad relay key');
+    const forwarded = await new Promise((resolve, reject) => {
+      const ws = new WebSocket('ws://127.0.0.1:' + relay.address().port + '/aliyun?k=secret');
+      const timer = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('aliyun proxy timeout')); }, 3000);
+      ws.onmessage = (ev) => { clearTimeout(timer); resolve(JSON.parse(ev.data)); try { ws.close(); } catch (e) {} };
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'session.update', session: { output_modalities: ['text'] } }));
+      ws.onerror = () => { clearTimeout(timer); try { ws.close(); } catch (e) {} reject(new Error('aliyun proxy failed')); };
+    });
+    assert(forwarded.type === 'session.created', 'proxies aliyun events');
+    assert(seenAuth.indexOf('Bearer sk-aliyun') >= 0, 'upstream sees the server key, not the relay key');
+    assert(seenMsg.some((t) => t.indexOf('session.update') >= 0), 'forwards client session.update');
+  } finally {
+    await new Promise((r) => relay.close(r));
+    await new Promise((r) => upstream.close(r));
   }
   if (process.exitCode) process.exit(process.exitCode);
   console.log('relay tests passed');

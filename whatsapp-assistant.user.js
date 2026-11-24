@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.8.1
+// @version      1.8.2
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -3025,7 +3025,7 @@
    *  翻译断开时把原麦克风轨道放回去，通话不会变成静音
    *  术语表：设置里的「通话术语」+ 原来的翻译术语表。同声传译模型不能保证照术语读，要强制译法用「带术语表」
    *  耳机模式：麦克风一直送去翻译。外放模式：对方出声时把麦克风从翻译通道掐掉，避免扬声器回声被再翻一遍
-   *  引擎表 CALL_PROVIDERS / registerCallProvider。国内同声传译（豆包、通义）还没定，先不接
+   *  引擎表 CALL_PROVIDERS。默认阿里云百炼 qwen3.8-livetranslate-flash-realtime（北京）。OpenAI 仍可选
    * ==================================================================== */
   const CALL_TRANSLATE_MODEL = 'gpt-realtime-translate';
   const CALL_AGENT_MODEL = 'gpt-realtime-2.1';
@@ -3145,16 +3145,26 @@
     } catch (e) { /* 有的音轨不让改处理参数，外放门控仍然生效 */ }
   }
   function callOutId() {
-    const id = store.get('callOutProvider', 'openai-translate') || 'openai-translate';
-    return CALL_PROVIDERS[id] ? id : 'openai-translate';
+    const id = store.get('callOutProvider', 'aliyun') || 'aliyun';
+    return CALL_PROVIDERS[id] ? id : 'aliyun';
   }
   function callInId() {
-    const id = store.get('callInProvider', 'openai-transcribe') || 'openai-transcribe';
-    return CALL_PROVIDERS[id] ? id : 'openai-transcribe';
+    const id = store.get('callInProvider', 'aliyun') || 'aliyun';
+    return CALL_PROVIDERS[id] ? id : 'aliyun';
+  }
+  function callEngineKind(id) {
+    if (id === 'fake') return 'none';
+    if (id === 'aliyun') return 'aliyun';
+    if (id && id.indexOf('openai') === 0) return 'openai';
+    return 'none';
   }
   function callHasCreds() {
-    if (callOutId() === 'fake' || callInId() === 'fake') return true;
-    return !!(String(store.get('callRelay', '') || '').trim() || String(store.get('callApiKey', '') || '').trim());
+    const kinds = [callEngineKind(callOutId()), callEngineKind(callInId())];
+    const relay = String(store.get('callRelay', '') || '').trim();
+    const key = String(store.get('callApiKey', '') || '').trim();
+    if (kinds.indexOf('aliyun') >= 0 && !relay) return false;
+    if (kinds.indexOf('openai') >= 0 && !relay && !key) return false;
+    return true;
   }
   function callLangName(code) {
     if (code === 'zh') return '中文';
@@ -3554,12 +3564,219 @@
     return Promise.resolve(handle);
   }
 
-  // 每家引擎：start({ direction, track, lang, onEvent }) => { updateLanguage, replaceSource, close, send?, fail? }
-  // 国内同声传译（火山豆包、通义 LiveTranslate）还没选定，不要在这里接。选定后 registerCallProvider 加一行即可。
+  const ALIYUN_MODEL = 'qwen3.8-livetranslate-flash-realtime';
+  function aliyunPhrases(targetLang) {
+    const phrases = {};
+    let n = 0;
+    const put = (src, dst) => {
+      src = String(src || '').replace(/[\r\n]/g, ' ').trim();
+      dst = String(dst || '').replace(/[\r\n]/g, ' ').trim();
+      if (!src || !dst || src.length > 80 || dst.length > 80 || phrases[src] || n >= 1000) return;
+      phrases[src] = dst;
+      n++;
+    };
+    String(store.get('callTerms', DEFAULT_CALL_TERMS) || '').split('\n').forEach((line) => {
+      const t = line.replace(/[<>]/g, '').trim();
+      if (t) put(t, t);
+    });
+    String(store.get('glossary', '') || '').split('\n').forEach((line) => {
+      const m = line.match(/^\s*([^=＝#]+?)\s*[=＝]\s*(.+?)\s*$/);
+      if (!m) return;
+      const zh = m[1].trim();
+      const parts = m[2].split(/\s*[|｜]\s*/);
+      const en = (parts[0] || '').trim();
+      const es = (parts[1] || '').trim();
+      const fr = (parts[2] || '').trim();
+      const foreign = targetLang === 'es' ? (es || en) : targetLang === 'fr' ? (fr || en) : en;
+      if (targetLang === 'zh') {
+        if (en) put(en, zh);
+        if (es) put(es, zh);
+        if (fr) put(fr, zh);
+      } else if (foreign) {
+        put(zh, foreign);
+      }
+    });
+    return phrases;
+  }
+  function aliyunSession(opts) {
+    const incoming = opts.direction === 'in';
+    const lang = incoming ? 'zh' : (opts.lang || 'en');
+    const session = {
+      input_modalities: ['audio'],
+      output_modalities: incoming ? ['text'] : ['text', 'audio'],
+      audio: {
+        input: {
+          format: { type: 'pcm', sample_rate: 16000 },
+          turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: opts.silenceMs || 400 },
+        },
+      },
+      translation: {
+        language: lang,
+        corpus: { phrases: opts.phrases || {} },
+      },
+    };
+    if (!incoming) {
+      session.audio.output = { voice: 'Tina' };
+      if (opts.clone) {
+        session.enable_voice_clone = true;
+        session.voice_clone_options = { frequency: 'once' };
+      }
+    }
+    return { type: 'session.update', session: session };
+  }
+  function aliyunWsUrl(relay, relayKey) {
+    const raw = String(relay || '').trim();
+    if (!raw) throw new Error('请填写中转地址');
+    const u = new URL(raw);
+    u.pathname = u.pathname.replace(/\/session\/?$/, '').replace(/\/$/, '') + '/aliyun';
+    u.protocol = u.protocol === 'https:' ? 'wss:' : u.protocol === 'http:' ? 'ws:' : u.protocol;
+    u.search = '';
+    if (relayKey) u.searchParams.set('k', relayKey);
+    return u.toString();
+  }
+  function pcm16ToBase64(int16) {
+    const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+  function downsampleTo16k(float32, inRate) {
+    const ratio = inRate / 16000;
+    const n = Math.max(0, Math.floor(float32.length / ratio));
+    const out = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      const idx = Math.min(float32.length - 1, Math.floor(i * ratio));
+      let s = float32[idx];
+      if (s > 1) s = 1;
+      if (s < -1) s = -1;
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  }
+  function startAliyun(ctx) {
+    const WS = pageWin().WebSocket;
+    if (typeof WS !== 'function') return Promise.reject(new Error('这个浏览器没有 WebSocket'));
+    if (!callAudio) return Promise.reject(new Error('音频还没准备好'));
+    const url = aliyunWsUrl(store.get('callRelay', ''), store.get('callRelayKey', ''));
+    const update = aliyunSession({
+      direction: ctx.direction,
+      lang: ctx.lang,
+      silenceMs: callSilenceMs(),
+      clone: ctx.direction !== 'in' && !!store.get('callAliyunClone', false),
+      phrases: aliyunPhrases(ctx.direction === 'in' ? 'zh' : (ctx.lang || 'en')),
+    });
+    let ws = null;
+    let closed = false;
+    let ready = false;
+    let reconnecting = false;
+    let proc = null;
+    let zero = null;
+    let micSrc = null;
+    const openSocket = () => new Promise((resolve, reject) => {
+      const sock = new WS(url);
+      ws = sock;
+      let settled = false;
+      const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+      sock.onerror = () => fail(new Error('连不上翻译中转'));
+      sock.onopen = () => {};
+      sock.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === 'session.created') {
+          try { sock.send(JSON.stringify(update)); } catch (e) { fail(e); }
+          return;
+        }
+        if (msg.type === 'session.updated') {
+          ready = true;
+          if (!settled) { settled = true; resolve(sock); }
+          try { ctx.onEvent({ type: 'open' }); } catch (e) {}
+          return;
+        }
+        const delta = typeof msg.delta === 'string' ? msg.delta : '';
+        if ((msg.type === 'response.text.delta' || msg.type === 'response.audio_transcript.delta') && delta) {
+          ctx.onEvent({ type: 'transcript', role: 'translated', text: delta, partial: true });
+        } else if (msg.type === 'conversation.item.input_audio_transcription.delta' && delta) {
+          ctx.onEvent({ type: 'transcript', role: 'source', text: delta, partial: true });
+        } else if (msg.type === 'conversation.item.input_audio_transcription.completed') {
+          ctx.onEvent({ type: 'transcript', role: 'source', text: msg.transcript || delta, partial: false });
+        } else if (msg.type === 'response.done') {
+          ctx.onEvent({ type: 'transcript', role: 'translated', text: '', partial: false, flush: true });
+        } else if (msg.type === 'response.audio.delta' && delta && ctx.direction !== 'in') {
+          ctx.onEvent({ type: 'pcm', delta: delta, rate: 24000 });
+        } else if (msg.type === 'error') {
+          const text = (msg.error && (msg.error.message || msg.error.code)) || msg.message || '阿里云翻译报错';
+          if (/no semantic result after merged audio exceeded 60s/i.test(String(text))) {
+            reconnect();
+            return;
+          }
+          ctx.onEvent({ type: 'error', message: String(text) });
+        }
+      };
+      sock.onclose = () => {
+        ready = false;
+        if (closed || reconnecting) return;
+        ctx.onEvent({ type: 'close', message: '阿里云连接已断开' });
+      };
+    });
+    function reconnect() {
+      if (closed || reconnecting) return;
+      reconnecting = true;
+      ready = false;
+      try { ws.close(); } catch (e) {}
+      try { ctx.onEvent({ type: 'status', message: '静音较久，正在重新连接翻译' }); } catch (e) {}
+      openSocket().then(() => { reconnecting = false; }).catch((e) => {
+        reconnecting = false;
+        ctx.onEvent({ type: 'error', message: '重新连接失败：' + (e.message || '') });
+      });
+    }
+    try {
+      micSrc = callAudio.createMediaStreamSource(new MediaStream([ctx.track]));
+      proc = callAudio.createScriptProcessor(4096, 1, 1);
+      zero = callAudio.createGain();
+      zero.gain.value = 0;
+      micSrc.connect(proc);
+      proc.connect(zero);
+      zero.connect(callAudio.destination);
+      proc.onaudioprocess = (ev) => {
+        if (!ready || !ws || ws.readyState !== 1) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        const pcm = downsampleTo16k(input, callAudio.sampleRate || 48000);
+        if (!pcm.length) return;
+        try { ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: pcm16ToBase64(pcm) })); } catch (e) {}
+      };
+    } catch (e) { /* 没有采集节点时仍允许会话配置，测试用假 WebSocket */ }
+    const handle = {
+      updateLanguage(lang) {
+        update.session.translation.language = lang === 'zh' ? 'zh' : lang;
+        update.session.translation.corpus.phrases = aliyunPhrases(lang === 'zh' ? 'zh' : lang);
+        if (ctx.direction === 'in') update.session.output_modalities = ['text'];
+        if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify(update)); } catch (e) {} }
+      },
+      replaceSource(track) {
+        ctx.track = track;
+        try {
+          if (micSrc) micSrc.disconnect();
+          micSrc = callAudio.createMediaStreamSource(new MediaStream([track]));
+          if (proc) micSrc.connect(proc);
+        } catch (e) {}
+      },
+      close() {
+        closed = true;
+        ready = false;
+        try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'session.finish' })); } catch (e) {}
+        try { if (ws) ws.close(); } catch (e) {}
+        try { if (proc) proc.disconnect(); } catch (e) {}
+        try { if (zero) zero.disconnect(); } catch (e) {}
+      },
+    };
+    return openSocket().then(() => handle);
+  }
+  // 每家引擎：start({ direction, track, lang, onEvent }) => { updateLanguage, replaceSource, close }
   const CALL_PROVIDERS = {
-    'openai-translate': { label: '同声传译（最快，术语表不保证）', dirs: 'both', start: startTranslate },
-    'openai-agent': { label: '带术语表（稍慢，句尾停顿后再开口）', dirs: 'out', start: startAgent },
-    'openai-transcribe': { label: '转写再翻译（更省，适合对方字幕）', dirs: 'in', start: startTranscribe },
+    'aliyun': { label: '阿里云百炼同声传译（默认，国内）', dirs: 'both', start: startAliyun },
+    'openai-translate': { label: 'OpenAI 同声传译（最快，术语表不保证）', dirs: 'both', start: startTranslate },
+    'openai-agent': { label: 'OpenAI 带术语表（稍慢）', dirs: 'out', start: startAgent },
+    'openai-transcribe': { label: 'OpenAI 转写再翻译（更省，仅字幕）', dirs: 'in', start: startTranscribe },
   };
   function registerCallProvider(id, spec) {
     if (!id || !spec || typeof spec.start !== 'function') throw new Error('引擎需要 start');
@@ -3899,6 +4116,27 @@
     callDuck.gain.value = v;
     try { callDuck.gain.setTargetAtTime(v, callAudio.currentTime, 0.04); } catch (e) {}
   }
+  let callPcmCursor = 0;
+  function playCallPcm(b64, rate) {
+    if (!callAudio || !callTtsGain || !b64) return;
+    let bin;
+    try { bin = atob(b64); } catch (e) { return; }
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const samples = Math.floor(bytes.length / 2);
+    if (!samples) return;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, samples * 2);
+    const audioBuf = callAudio.createBuffer(1, samples, rate || 24000);
+    const ch = audioBuf.getChannelData(0);
+    for (let i = 0; i < samples; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+    const src = callAudio.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(callTtsGain);
+    const now = callAudio.currentTime;
+    const startAt = Math.max(now + 0.02, callPcmCursor || 0);
+    try { src.start(startAt); } catch (e) { return; }
+    callPcmCursor = startAt + audioBuf.duration;
+  }
   function connectCallTts(stream) {
     if (!callAudio || !callTtsGain) return;
     if (callTtsNode) { try { callTtsNode.disconnect(); } catch (e) {} }
@@ -3951,7 +4189,8 @@
     const how = id === 'openai-agent' ? '带术语表' : id === 'openai-translate' ? '同声传译' : id === 'fake' ? '测试' : id;
     if (!callSlots.length) return '只在出字幕（没有找到送出的麦克风）';
     const room = callAudioMode() === 'speaker' ? '外放' : '耳机';
-    return '同传中 · ' + room + ' · 客户听到' + callLangName(callTargetLang()) + ' · ' + how;
+    const name = id === 'aliyun' ? '百炼' : how;
+    return '同传中 · ' + room + ' · 客户听到' + callLangName(callTargetLang()) + ' · ' + name;
   }
   async function ensureCallRunning() {
     if (!callAudio) return false;
@@ -3996,6 +4235,8 @@
       });
       return;
     }
+    if (ev.type === 'status') { if (ev.message) setCallStatus(ev.message); return; }
+    if (ev.type === 'pcm') { playCallPcm(ev.delta, ev.rate || 24000); return; }
     if (ev.type === 'audio-track' && ev.stream) { connectCallTts(ev.stream); return; }
     if (ev.type === 'transcript') {
       if (ev.role === 'translated') takeCallText('out', ev);
@@ -4109,7 +4350,8 @@
   async function startCallIn() {
     const my = ++callInGen;
     if (callIn) { const old = callIn; callIn = null; try { old.close(); } catch (e) {} }
-    const track = callActivePc ? remoteCallTrack(callActivePc) : null;
+    const fromPc = callActivePc ? remoteCallTrack(callActivePc) : null;
+    const track = fromPc || (callWatchedRemote && callWatchedRemote.readyState === 'live' ? callWatchedRemote : null);
     if (!track) return;
     const prov = CALL_PROVIDERS[callInId()];
     if (!prov || prov.dirs === 'out') return;
@@ -4181,6 +4423,7 @@
     callBoundRemote = null; callBoundLocal = null; callWatchedRemote = null;
     callGate = null; callGateSrc = null; callGateDest = null; callGateTrack = null; callFeedTrack = null;
     callRemoteHot = false; callRemoteUntil = 0; callHeardRemote = false; callLeoHot = false; callGateOpen = true;
+    callPcmCursor = 0;
     if (callAudio && callAudio.state !== 'closed') { try { callAudio.close(); } catch (e) {} }
     callAudio = null; callDest = null; callDuck = null; callTtsGain = null; callMixed = null;
     callActivePc = null;
@@ -4254,7 +4497,7 @@
       });
     }
     if (!callIn && !callInStarting) {
-      const rt = remoteCallTrack(callActivePc);
+      const rt = remoteCallTrack(callActivePc) || (callWatchedRemote && callWatchedRemote.readyState === 'live');
       if (rt) startCallIn();
     }
     if (callAudioMode() === 'speaker') syncSpeakerWatch();
@@ -4289,7 +4532,7 @@
       rtcApi.onRemoteTrack = () => { if (callActivePc && !callIn && !callInStarting) startCallIn(); };
       if (!callHasCreds()) {
         if (callActivePc) shutdownCall('');
-        setCallStatus('请先在 ⚙ 设置 → 通话同传 里填写中转地址或 OpenAI Key。没配好之前，对方听到的是您的原声。');
+        setCallStatus('请先在 ⚙ 设置 → 通话同传 里填写中转地址。阿里云的长期 Key 只放在你自己的服务器上。只用 OpenAI 时也可以改填 OpenAI Key。没配好之前，对方听到的是您的原声。');
         return;
       }
       let pc = null;
@@ -4335,6 +4578,8 @@
       fallback: !!callFallback,
       engaged: !!callEngaged,
       duck: callDuckGain(),
+      outProvider: callOutId(),
+      inProvider: callInId(),
       audioMode: callAudioMode(),
       audioRunning: !!(callAudio && callAudio.state === 'running'),
       hasRemoteAnalyser: !!callRemoteAnalyser,
@@ -4367,7 +4612,7 @@
     relayIn.value = store.get('callRelay', '') || '';
     const relayKeyIn = h('input', { type: 'password', id: 'wat-call-relay-key', placeholder: '跟服务器上的 RELAY_KEY 一致', autocomplete: 'off' });
     relayKeyIn.value = store.get('callRelayKey', '') || '';
-    const keyIn = h('input', { type: 'password', id: 'wat-call-key', placeholder: 'sk-…（没有中转时才填）', autocomplete: 'off' });
+    const keyIn = h('input', { type: 'password', id: 'wat-call-key', placeholder: 'sk-…（只用 OpenAI、且没有中转时才填）', autocomplete: 'off' });
     keyIn.value = store.get('callApiKey', '') || '';
     const outSel = h('select', { id: 'wat-call-out', class: 'pi-in' });
     const inSel = h('select', { id: 'wat-call-in', class: 'pi-in' });
@@ -4377,8 +4622,10 @@
       if (p.dirs !== 'in') outSel.appendChild(h('option', { value: id }, p.label));
       if (p.dirs !== 'out') inSel.appendChild(h('option', { value: id }, p.label));
     });
-    outSel.value = store.get('callOutProvider', 'openai-translate') || 'openai-translate';
-    inSel.value = store.get('callInProvider', 'openai-transcribe') || 'openai-transcribe';
+    outSel.value = callOutId();
+    inSel.value = callInId();
+    const cloneIn = h('input', { type: 'checkbox', id: 'wat-call-clone' });
+    cloneIn.checked = !!store.get('callAliyunClone', false);
     const silenceIn = h('input', { type: 'number', id: 'wat-call-silence', min: '200', max: '800', step: '50' });
     silenceIn.value = String(callSilenceMs());
     const duckIn = h('input', { type: 'number', id: 'wat-call-duck', min: '0', max: '100', step: '5' });
@@ -4403,10 +4650,20 @@
       const old = testBtn.textContent;
       testBtn.textContent = '测试中…';
       try {
-        await mintCallTry('https://api.openai.com/v1/realtime/translations/client_secrets', [
-          { session: { model: CALL_TRANSLATE_MODEL, audio: { output: { language: 'es' } } } },
-        ], { relay: relayIn.value.trim(), relayKey: relayKeyIn.value.trim(), apiKey: keyIn.value.trim() });
-        toast('连接成功：已拿到临时通话密钥。真正打电话时还会再连一次语音通道。');
+        const relay = relayIn.value.trim();
+        if (relay) {
+          const u = new URL(relay);
+          u.pathname = u.pathname.replace(/\/session\/?$/, '/health') || '/health';
+          u.search = '';
+          const txt = await callHttp({ method: 'GET', url: u.toString() });
+          if (txt.indexOf('ok') < 0) throw new Error('中转没有响应');
+          toast('中转已连通。阿里云的长期 Key 在服务器上，真正通话时才会连百炼。');
+        } else if (keyIn.value.trim()) {
+          await mintCallTry('https://api.openai.com/v1/realtime/translations/client_secrets', [
+            { session: { model: CALL_TRANSLATE_MODEL, audio: { output: { language: 'es' } } } },
+          ], { relay: '', relayKey: '', apiKey: keyIn.value.trim() });
+          toast('OpenAI 临时密钥已拿到。');
+        } else throw new Error('请填写中转地址');
       } catch (e) {
         toast('连接失败：' + e.message, true);
       } finally {
@@ -4419,9 +4676,10 @@
       h('div', { class: 'wp-muted' }, 'Key 不要写进脚本。推荐填你自己的中转地址（见仓库 call-relay，只负责换临时密钥，语音不经过它）。没有服务器时也可以把 OpenAI Key 填在下面，只存在这台浏览器里。'),
       h('label', null, '中转地址'), relayIn,
       h('label', null, '中转密钥（服务器上的 RELAY_KEY）'), relayKeyIn,
-      h('label', null, 'OpenAI API Key（填了中转就可以留空）'), keyIn,
+      h('label', null, 'OpenAI API Key（只用 OpenAI 引擎、且没有中转时才填。阿里云的长期 Key 不要填在这里）'), keyIn,
       h('div', { class: 'wp-btns' }, testBtn),
       h('label', null, '我说话（译给客户听）'), outSel,
+      h('label', { class: 'ws-inline' }, cloneIn, ' 阿里云尽量模仿我的声音（实时声音复刻，默认用 Tina）'),
       h('div', { class: 'wp-muted' }, '同声传译边说边出，延迟最低，但不能把术语表交给模型（车型名可能读错）。要强制 Chery、R8 这类译法，选「带术语表」，它会等一句说完（下面的停顿）再开口，大约慢半秒。'),
       h('label', null, '对方说话（只给您看字幕）'), inSel,
       h('div', { class: 'wp-muted' }, '对方字幕默认用更便宜的转写，再翻成中文。想更顺可以改成同声传译，费用大约翻倍。费用随官网变，大致：同声传译约 $0.034/分钟，转写约 $0.017/分钟。双方都开着同声传译时，一小时大约 4 美元。'),
@@ -4434,7 +4692,7 @@
       h('label', null, '外放：把对方当成「正在说话」的音量（0.005–0.2，默认 0.02）'), remoteRmsIn,
       h('label', null, '外放：对方停口后的尾音（毫秒，200–800，默认 400）'), hangIn,
       h('label', null, '外放：把您当成「开始说话」的音量（0.005–0.2，默认 0.03）'), localRmsIn,
-      h('div', { class: 'wp-muted' }, '房间有底噪时，把「您开始说话」的音量调高一点，避免尾音刚过就把杂音送去翻译。对方声音小、门控关得太晚，就把对方音量调低。国内同声传译接口（豆包、通义）还没定，这里先不接；选定后只加一个引擎，不用改这条通话流程。'),
+      h('div', { class: 'wp-muted' }, '房间有底噪时，把「您开始说话」的音量调高一点，避免尾音刚过就把杂音送去翻译。对方声音小、门控关得太晚，就把对方音量调低。默认引擎是阿里云百炼（北京，qwen3.8-livetranslate-flash-realtime），长期 Key 只放在中转服务器上。OpenAI 仍可在上面两个下拉框里改回去。'),
       h('label', { class: 'ws-inline' }, showIn, ' 字幕里同时显示原文'),
       h('label', null, '通话术语（每行一个专名；也会带上「基本设置」里的翻译术语表）'), termsIn,
       h('div', { class: 'wp-muted' }, '术语写成「中文 = 英文 | 西语 | 法语」时，第三段法语只给通话用，不影响原来的文字翻译。'));
@@ -4442,6 +4700,7 @@
       store.set('callRelay', relayIn.value.trim());
       store.set('callRelayKey', relayKeyIn.value.trim());
       store.set('callApiKey', keyIn.value.trim());
+      store.set('callAliyunClone', !!cloneIn.checked);
       if (outSel.value) store.set('callOutProvider', outSel.value);
       if (inSel.value) store.set('callInProvider', inSel.value);
       const silence = Number(silenceIn.value);
@@ -4484,6 +4743,9 @@
           setOn: setCallOn,
           watchRemote: watchRemoteForTest,
           registerProvider: registerCallProvider,
+          aliyunSession: aliyunSession,
+          aliyunPhrases: aliyunPhrases,
+          aliyunWsUrl: aliyunWsUrl,
         };
       }
     } catch (e) { /* 正式页面不挂测试接口 */ }

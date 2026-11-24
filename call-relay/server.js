@@ -1,14 +1,17 @@
 'use strict';
 
-// 可选的通话同传中转。只做一件事：用你服务器上的 OpenAI Key 换一个短时密钥，
-// 交给浏览器去连 OpenAI。语音不经过这里。
+// 通话同传中转。长期 Key 只放在这里。
+// 阿里云：浏览器连 /aliyun，本服务再去连北京百炼（浏览器加不了 Authorization 头）。
+// OpenAI：POST /session 换一个短时密钥，语音不经过这里。
 //
-//   OPENAI_API_KEY=sk-... RELAY_KEY=一串自己设的密码 node server.js
+//   RELAY_KEY=密码 DASHSCOPE_API_KEY=百炼Key ALIYUN_WORKSPACE=业务空间 node server.js
 //
-// 浏览器插件里「中转地址」填 http://你的服务器:8787/session ，中转密钥填同一个 RELAY_KEY。
+// 插件「中转地址」填 http://你的服务器:8787/session ，中转密钥填同一个 RELAY_KEY。
 
 const http = require('http');
 const https = require('https');
+const { URL } = require('url');
+const { acceptBrowser, connectUpstream, aliyunUpstreamUrl } = require('./wsutil');
 
 function allowedTarget(url) {
   let u;
@@ -107,26 +110,79 @@ async function handle(req, res, deps) {
   }
 }
 
+function relayKeyFrom(req) {
+  const header = bearer(req);
+  if (header) return header;
+  try {
+    const u = new URL(req.url || '/', 'http://127.0.0.1');
+    return u.searchParams.get('k') || '';
+  } catch (e) { return ''; }
+}
+
+function attachAliyun(server, deps) {
+  server.on('upgrade', (req, socket) => {
+    const path = (req.url || '/').split('?')[0];
+    if (path !== '/aliyun') { socket.destroy(); return; }
+    if (!deps.relayKey || relayKeyFrom(req) !== deps.relayKey) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const upstreamUrl = deps.aliyunUrl || aliyunUpstreamUrl(deps.aliyunWorkspace, deps.aliyunModel);
+    if (!upstreamUrl || !deps.dashscopeKey) {
+      socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const browser = acceptBrowser(req, socket);
+    if (!browser) return;
+    const pending = [];
+    let upstreamPeer = null;
+    browser.onFrame((text) => {
+      if (upstreamPeer) upstreamPeer.send(text);
+      else pending.push(text);
+    });
+    const connect = deps.connectUpstream || connectUpstream;
+    connect(upstreamUrl, { Authorization: 'Bearer ' + deps.dashscopeKey }).then((upstream) => {
+      upstreamPeer = upstream;
+      pending.splice(0).forEach((text) => upstream.send(text));
+      const closeBoth = () => { try { browser.close(); } catch (e) {} try { upstream.close(); } catch (e) {} };
+      upstream.onFrame((text) => browser.send(text));
+      browser.onClose(closeBoth);
+      upstream.onClose(closeBoth);
+    }).catch(() => { try { browser.close(); } catch (e) {} });
+  });
+  return server;
+}
+
 function createServer(deps) {
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     handle(req, res, deps).catch((e) => {
       if (!res.headersSent) send(res, 500, { error: e.message || 'error' });
     });
   });
+  attachAliyun(server, deps || {});
+  return server;
 }
 
 if (require.main === module) {
   const openaiKey = process.env.OPENAI_API_KEY || '';
   const relayKey = process.env.RELAY_KEY || '';
+  const dashscopeKey = process.env.DASHSCOPE_API_KEY || '';
+  const aliyunWorkspace = process.env.ALIYUN_WORKSPACE || '';
+  const aliyunModel = process.env.ALIYUN_MODEL || 'qwen3.8-livetranslate-flash-realtime';
   const port = Number(process.env.PORT || 8787);
-  if (!openaiKey || !relayKey) {
-    console.error('请设置环境变量 OPENAI_API_KEY 和 RELAY_KEY 后再启动。不要把 Key 写进代码。');
+  const hasAliyun = !!(dashscopeKey && aliyunWorkspace);
+  if (!relayKey || (!openaiKey && !hasAliyun)) {
+    console.error('请设置 RELAY_KEY，以及 OPENAI_API_KEY 或 DASHSCOPE_API_KEY + ALIYUN_WORKSPACE。不要把 Key 写进代码。');
     process.exit(1);
   }
-  const server = createServer({ openaiKey, relayKey, forward: forwardOpenAI });
+  const server = createServer({
+    openaiKey, relayKey, forward: forwardOpenAI, dashscopeKey, aliyunWorkspace, aliyunModel,
+  });
   server.listen(port, () => {
-    console.log('通话同传中转已监听 http://127.0.0.1:' + port + '/session');
+    console.log('通话同传中转已监听 http://127.0.0.1:' + port + '/session 和 /aliyun');
   });
 }
 
-module.exports = { allowedTarget, createServer, handle };
+module.exports = { allowedTarget, createServer, handle, aliyunUpstreamUrl };

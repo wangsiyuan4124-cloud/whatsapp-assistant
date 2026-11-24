@@ -1,30 +1,36 @@
-# 通话同传中转（可选）
+# 通话同传中转
 
-浏览器插件不要长期保存 OpenAI 的主 Key 时，用这个小服务换一个十几分钟有效的临时密钥。语音直接在浏览器和 OpenAI 之间走，不经过这台机器。
+浏览器不能把长期 API Key 放在网页里，也不能在 WebSocket 握手上自己加 `Authorization`。这个小服务跑在你自己的云服务器上（旁边已有 Java / PostgreSQL 没关系，它不用数据库）：
 
-不部署也可以：在插件「设置 → 通话同传」里直接填 OpenAI Key（只存在你这台电脑的浏览器里）。
+- `POST /session`：用 OpenAI Key 换一个短时密钥。只有还要用 OpenAI 引擎时才需要。
+- `GET /aliyun`（WebSocket）：浏览器把音频 JSON 发到这里，服务器带上百炼 Key 去连北京的实时翻译，再把结果转回来。语音经过这台机器，Key 不进浏览器。
 
-## 运行
+## 百炼（默认）
 
-需要 Node.js 18 或更新。没有第三方依赖。
+1. 阿里云实名，开通百炼，地域选华北 2（北京）。
+2. 创建 API Key，抄下业务空间 ID（WorkspaceId）。
+3. 控制台把免费额度设成用完即停。新用户常见额度是 100 万 Token / 90 天，以页面显示为准。
+4. 服务器安装 Node.js 18 或更新（这台开发机用的是 22）。
 
 ```bash
 cd call-relay
-OPENAI_API_KEY=sk-你的密钥 RELAY_KEY=自己设一串长密码 node server.js
+RELAY_KEY='自己设一串长密码' \
+DASHSCOPE_API_KEY='百炼的长期 Key' \
+ALIYUN_WORKSPACE='业务空间 ID' \
+node server.js
 ```
 
-默认监听 `8787`。换端口：`PORT=9000`。
+默认模型 `qwen3.8-livetranslate-flash-realtime`，地址是 `wss://<业务空间>.cn-beijing.maas.aliyuncs.com/...`。不要把 Key 写进代码或提交到仓库。
 
-- `GET /health` 返回 `{"ok":true}`
-- `POST /session`，请求头 `Authorization: Bearer <RELAY_KEY>`，正文：
+前面用 Nginx 或 Caddy 做 HTTPS，并打开 WebSocket 升级（`Upgrade` / `Connection`）。插件「中转地址」填 `https://你的域名/session`，「中转密钥」填同一个 `RELAY_KEY`。插件会自己把地址换成 `wss://你的域名/aliyun?k=...`。
 
-```json
-{ "url": "https://api.openai.com/v1/realtime/translations/client_secrets", "body": { "session": {} } }
+## OpenAI（可选）
+
+```bash
+RELAY_KEY='同一串密码' OPENAI_API_KEY='sk-...' node server.js
 ```
 
-只允许转到 `https://api.openai.com/v1/realtime/` 下面的地址。主 Key 只留在服务器环境变量里，不要写进代码、不要提交到仓库。
-
-插件里「中转地址」填 `https://你的域名/session`，「中转密钥」填同一个 `RELAY_KEY`。本机试听可以先用 `http://127.0.0.1:8787/session`，WhatsApp 网页是 https，正式用时要给中转加 https，否则浏览器会拦住。
+两个 Key 可以同时配。插件里把引擎从「阿里云百炼」改成 OpenAI 即可。
 
 ## 自测
 
