@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.8.2
+// @version      1.8.3
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -3119,9 +3119,10 @@
     return Math.round(Math.min(800, Math.max(200, n)));
   }
   // 外放模式时，浏览器新开的麦克风带上回声消除和降噪。耳机模式不改 WhatsApp 原来的参数。
+  // 只在「通话同传」打开时生效：关掉之后（比如录语音消息）一律不动 WhatsApp 的麦克风参数。
   function speakerMicConstraints(constraints) {
     try {
-      if (!store || store.get('callAudioMode', 'headphone') !== 'speaker') return constraints;
+      if (!store || !store.get('callOn', false) || store.get('callAudioMode', 'headphone') !== 'speaker') return constraints;
     } catch (e) { return constraints; }
     if (!constraints || !constraints.audio) return constraints;
     const next = {};
@@ -3192,7 +3193,7 @@
     const words = raw.toLowerCase().split(/[^a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1\u00e0\u00e2\u00e7\u00e8\u00ea\u00eb\u00ee\u00ef\u00f4\u00f9\u00fb\u0153']+/i).filter(Boolean);
     const ES = new Set('el los las que por para con una hola gracias precio quiero como cuánto cuanto cuesta carro coche usado usted ustedes donde dónde'.split(' '));
     const FR = new Set('le les des une et vous nous est pas pour avec bonjour merci prix voiture comment où ou quel quelle'.split(' '));
-    const BOTH = new Set('la de un en');
+    const BOTH = new Set('la de un en'.split(' '));
     const EN = new Set('the of to and in is are you we they this that for with price car hello thanks please want how what where much can your'.split(' '));
     let es = 0, fr = 0, en = 0;
     words.forEach((w) => {
@@ -4672,19 +4673,20 @@
       }
     };
     const sec = h('div', null,
-      h('div', { class: 'wp-muted', style: 'margin-top:8px' }, '默认关闭。打开后，只在 WhatsApp 网页语音通话里生效：您说中文，客户听到译好的英语 / 西语 / 法语；客户说的话在页面上显示中文字幕。客户不用装任何东西。请戴耳机，否则外放会被再次翻译。'),
-      h('div', { class: 'wp-muted' }, 'Key 不要写进脚本。推荐填你自己的中转地址（见仓库 call-relay，只负责换临时密钥，语音不经过它）。没有服务器时也可以把 OpenAI Key 填在下面，只存在这台浏览器里。'),
+      h('div', { class: 'wp-muted', style: 'margin-top:8px' }, '默认关闭。打开后，只在 WhatsApp 网页语音通话里生效：您说中文，客户听到译好的英语 / 西语 / 法语；客户说的话在页面上显示中文字幕。客户不用装任何东西。建议戴耳机；不戴耳机时，在下面选「外放模式」。'),
+      h('div', { class: 'wp-muted' }, '默认引擎阿里云百炼：通话中您和客户双方的声音都会经过您自己的中转服务器（仓库里的 call-relay），再送到阿里云（北京）识别和翻译。阿里云的长期 Key 只放在服务器上，不要填在这里。选 OpenAI 引擎时，中转只负责换一个临时密钥，声音直接送到 OpenAI；没有服务器时也可以把 OpenAI Key 填在下面，只存在这台浏览器里。'),
+      h('div', { class: 'wp-muted' }, '费用提醒：通话期间双方的声音会持续送去翻译（没人说话时也在送），按用量计费。建议在阿里云控制台打开「免费额度用完即停」，第一次通话后去看一下用了多少。'),
       h('label', null, '中转地址'), relayIn,
       h('label', null, '中转密钥（服务器上的 RELAY_KEY）'), relayKeyIn,
       h('label', null, 'OpenAI API Key（只用 OpenAI 引擎、且没有中转时才填。阿里云的长期 Key 不要填在这里）'), keyIn,
       h('div', { class: 'wp-btns' }, testBtn),
       h('label', null, '我说话（译给客户听）'), outSel,
       h('label', { class: 'ws-inline' }, cloneIn, ' 阿里云尽量模仿我的声音（实时声音复刻，默认用 Tina）'),
-      h('div', { class: 'wp-muted' }, '同声传译边说边出，延迟最低，但不能把术语表交给模型（车型名可能读错）。要强制 Chery、R8 这类译法，选「带术语表」，它会等一句说完（下面的停顿）再开口，大约慢半秒。'),
+      h('div', { class: 'wp-muted' }, '阿里云（默认）：边说边译，并会把下面的「通话术语」和基本设置里的翻译术语表交给模型。选 OpenAI 时：「OpenAI 同声传译」延迟最低，但不能带术语表（车型名可能读错）；要强制 Chery、R8 这类译法选「OpenAI 带术语表」，它会等一句说完（下面的停顿）再开口，大约慢半秒。'),
       h('label', null, '对方说话（只给您看字幕）'), inSel,
-      h('div', { class: 'wp-muted' }, '对方字幕默认用更便宜的转写，再翻成中文。想更顺可以改成同声传译，费用大约翻倍。费用随官网变，大致：同声传译约 $0.034/分钟，转写约 $0.017/分钟。双方都开着同声传译时，一小时大约 4 美元。'),
+      h('div', { class: 'wp-muted' }, '阿里云（默认）：对方的话只出中文文字，不生成语音，比较省。选 OpenAI 时：「转写再翻译」更省（约 $0.017/分钟），「同声传译」约 $0.034/分钟。价格以各家官网为准。'),
       h('label', null, '句尾停顿（毫秒，200–800，默认 400）'), silenceIn,
-      h('div', { class: 'wp-muted' }, '只影响「带术语表」和「转写再翻译」。300 更快但容易把一句话切断；600 更稳但更慢。同声传译不看这个数，它是边说边译。'),
+      h('div', { class: 'wp-muted' }, '阿里云用它判断一句话说完（仍然边说边出字）；OpenAI「带术语表」和「转写再翻译」也用它，OpenAI 同声传译不看。300 更快但容易把一句话切断；600 更稳但更慢。'),
       h('label', null, '原声混入（0–100，0 表示客户只听到译文）'), duckIn,
       h('div', { class: 'wp-muted' }, '15 左右是译文下面垫一层很小的您的原声。翻译服务一旦断开，会立刻改回 100% 原声，避免对方听成静音。'),
       h('label', null, '听音方式（通话中也可以在浮层里改）'), modeSel,

@@ -162,6 +162,27 @@ function assert(cond, msg) {
   assert(off.hidden && off.enabled === false, 'overlay hides when off');
   assert(off.stuck, 'after off, replaceTrack is not forced back to the mix');
 
+  // 外放模式只在通话同传打开时改麦克风参数；关掉后录语音消息等不受影响
+  const mic = await page.evaluate(async () => {
+    const ec = async () => {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false } });
+      const t = s.getAudioTracks()[0];
+      const v = t.getSettings().echoCancellation;
+      t.stop();
+      return v;
+    };
+    GM_setValue('callAudioMode', 'speaker');
+    GM_setValue('callOn', false);
+    const whenOff = await ec();
+    GM_setValue('callOn', true);
+    const whenOn = await ec();
+    GM_setValue('callOn', false);
+    GM_setValue('callAudioMode', 'headphone');
+    return { whenOff, whenOn };
+  });
+  assert(mic.whenOff === false, 'speaker mode does not touch the mic while the feature is off ' + JSON.stringify(mic));
+  assert(mic.whenOn === true, 'speaker mode turns on echo cancellation while the feature is on ' + JSON.stringify(mic));
+
   // 外放模式：对方出声时，本地麦克风不再送进翻译；停口并过尾音后，要等 Leo 开口才恢复。
   await page.evaluate(() => {
     GM_setValue('callAudioMode', 'speaker');

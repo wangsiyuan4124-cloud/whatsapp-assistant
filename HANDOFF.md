@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.8.2**，一个文件，约 4800 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
+当前版本：**v1.8.3**，一个文件，约 4800 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
 
 ## 2. 功能清单
 
@@ -71,7 +71,8 @@
 6. GitHub 的 raw 下载地址有大约 5 分钟缓存。发布后要确认 raw 地址拿到的已经是新版本号，再通知用户更新。
 7. AI 翻译时要忠实原文、保留人称（曾经把「Can I give you an estimate」翻成「能给我报价吗」）。
 8. 谷歌 / 微软是逐字直译，会出中式英语（例：「二手车」→ second-hand car，当地说 used car）。所以发送翻译默认用 AI，术语表兜底。
-9. 通话同传的钩子在功能关闭时也不能把音轨换掉。送给翻译服务的必须是原始麦克风，不能是已经混进译文的那条，否则会自己翻自己。翻译失败要 `replaceTrack` 回原麦克风。`t14` 覆盖这三件事。真 WhatsApp 通话这个测试环境打不了。
+9. 通话同传的钩子在功能关闭时也不能把音轨换掉。送给翻译服务的必须是原始麦克风，不能是已经混进译文的那条，否则会自己翻自己。翻译失败要 `replaceTrack` 回原麦克风。`t14` 覆盖这三件事。真 WhatsApp 通话这个测试环境打不了。`getUserMedia` 钩子一直装着，所以外放模式改麦克风参数（`speakerMicConstraints`）必须同时判断 `callOn`，否则关掉同传后录语音消息也会被改参数（v1.8.3 修过，`t14` 有检查）。
+10. 说明文字要跟默认引擎一致：阿里云（默认）时**双方语音都经过 call-relay 再到阿里云北京**；只有 OpenAI 时中转才「只换临时密钥、语音不经过」。v1.8.3 之前设置页和 README 把 OpenAI 时期的说法留给了默认的阿里云，已改。
 
 ## 6. 产品决定和用户偏好
 
