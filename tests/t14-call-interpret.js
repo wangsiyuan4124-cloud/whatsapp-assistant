@@ -105,8 +105,8 @@ function assert(cond, msg) {
   });
   await page.waitForTimeout(200);
   const idle = await page.evaluate(() => window.__WAT_CALL__.state());
-  assert(idle.enabled && /未检测到/.test(idle.status), 'no call yet: ' + idle.status);
-  assert(/耳机/.test(idle.overlay), 'headphones warning visible');
+  assert(idle.enabled && /等您/.test(idle.status), 'no call yet: ' + idle.status);
+  assert(!idle.boxVisible, 'no call: overlay stays hidden so it does not cover the chat');
 
   await page.evaluate(() => window.__WAT_CALL__.attach(window.__pc));
   await page.waitForTimeout(80);
@@ -124,6 +124,7 @@ function assert(cond, msg) {
   const mixedOk = !!(live && live.mixed && live.senderTrackId && live.senderTrackId !== live.micId);
   if (!mixedOk) console.log('state while waiting for mix', JSON.stringify(live));
   assert(mixedOk, 'outgoing track replaced with the mix');
+  assert(live.boxVisible && /耳机/.test(live.overlay), 'during a call the overlay shows the headphones warning');
 
   await page.evaluate(() => window.__WAT_CALL__.failOut());
   let back = null;

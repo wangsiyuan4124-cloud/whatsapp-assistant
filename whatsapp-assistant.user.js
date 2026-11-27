@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.8.4
+// @version      1.8.5
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -92,6 +92,14 @@
           const args = next === constraints ? arguments : [next];
           return Promise.resolve(bound.apply(md, args)).then((stream) => {
             try { if (api.onMic) api.onMic(stream); } catch (err) { /* ignore */ }
+            // WhatsApp 网页版通话要麦克风时（16kHz 单声道），同传打开就换成插件的「虚拟麦克风」；
+            // 同传关着或出错时 mapMic 返回空，WhatsApp 拿到的就是原来的麦克风
+            try {
+              if (api.mapMic && isVoipMicRequest(constraints)) {
+                const mapped = api.mapMic(stream, constraints);
+                if (mapped) return Promise.resolve(mapped).then((m) => m || stream, () => stream);
+              }
+            } catch (err) { /* 出错就用原麦克风 */ }
             return stream;
           });
         };
@@ -99,6 +107,36 @@
         md.getUserMedia = wrapped;
       }
     } catch (e) { /* 没有 mediaDevices 也不影响文字翻译 */ }
+    // WhatsApp 网页版通话不用 WebRTC 音轨：对方的声音由音频处理器 voip-shared-buffer-playback-processor 接到扬声器。
+    // 这里记下每个 AudioWorkletNode 的处理器名，它接到扬声器时通知同传模块「另接一路」出来做字幕（不影响播放）。
+    try {
+      const OrigAWN = root.AudioWorkletNode;
+      if (typeof OrigAWN === 'function') {
+        const WatAWN = function (ctx, name, opts) {
+          const node = new OrigAWN(ctx, name, opts);
+          try { node.__watName = String(name || ''); } catch (e2) { /* ignore */ }
+          return node;
+        };
+        WatAWN.prototype = OrigAWN.prototype;
+        try { Object.setPrototypeOf(WatAWN, OrigAWN); } catch (e2) { /* ignore */ }
+        root.AudioWorkletNode = WatAWN;
+      }
+      const AN = root.AudioNode && root.AudioNode.prototype;
+      if (AN && typeof AN.connect === 'function') {
+        const origConnect = AN.connect;
+        api.rawConnect = origConnect;
+        AN.connect = function (dest) {
+          const r = origConnect.apply(this, arguments);
+          try {
+            if (this.__watName && /playback/i.test(this.__watName) && dest && this.context && dest === this.context.destination) {
+              api.lastPlayback = this; // 同传在通话中途才打开时，也能找到它出字幕
+              if (api.onPlayback) api.onPlayback(this);
+            }
+          } catch (e2) { /* ignore */ }
+          return r;
+        };
+      }
+    } catch (e) { /* 没有 Web Audio 也不影响文字翻译 */ }
     try {
       Object.defineProperty(root, '__watRtcHookV1', { value: api, enumerable: false, configurable: true, writable: true });
     } catch (e) {
@@ -786,12 +824,19 @@
   #wat-chip.wat-chip-btn{background:#25d366;color:#fff}
   #wat-chip.wat-chip-result{background:#fffbe6;color:#111;border:1px solid #e8d48a}
   #wat-chip button{margin-top:4px;font:inherit;border:0;border-radius:8px;padding:2px 8px;background:#25d366;color:#fff;cursor:pointer}
-  #wat-callbox{position:fixed;z-index:10005;top:12px;left:50%;transform:translateX(-50%);width:min(520px,calc(100vw - 24px));
+  #wat-callbox{position:fixed;z-index:10005;right:16px;bottom:72px;width:min(380px,calc(100vw - 32px));max-height:45vh;overflow:auto;box-sizing:border-box;
     background:rgba(17,27,33,.92);color:#e9edef;border-radius:12px;padding:8px 12px 10px;font:13px/1.45 system-ui,"Microsoft YaHei",sans-serif;
     box-shadow:0 6px 24px rgba(0,0,0,.28)}
-  #wat-callbox .hd{display:flex;gap:8px;align-items:baseline;justify-content:space-between}
-  #wat-callbox .hd b{font-size:13px}
-  #wat-callbox .st{font-size:12px;color:#d1d7db;text-align:right}
+  html.wat-docked #wat-callbox{right:0;bottom:0;width:var(--wat-pw);max-height:40vh;border-radius:12px 12px 0 0}
+  #wat-callbox .hd{display:flex;gap:8px;align-items:center}
+  #wat-callbox .hd b{font-size:13px;white-space:nowrap}
+  #wat-callbox .st{flex:1;font-size:12px;color:#d1d7db;text-align:right;overflow:hidden;text-overflow:ellipsis}
+  #wat-callbox .hd button{font:inherit;font-size:12px;border:0;border-radius:6px;padding:0 6px;background:#2a3942;color:#e9edef;cursor:pointer;line-height:20px}
+  #wat-callbox.mini{width:auto;max-width:min(380px,calc(100vw - 32px));padding:4px 8px}
+  html.wat-docked #wat-callbox.mini{width:var(--wat-pw)}
+  #wat-callbox.mini .tip,#wat-callbox.mini .row,#wat-callbox.mini .lab,#wat-callbox.mini .orig,#wat-callbox.mini .out{display:none}
+  #wat-callbox.mini .sub{margin-top:2px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #wat-callbox.mini .st{display:none}
   #wat-callbox .tip{margin-top:4px;font-size:12px;color:#ffe08a}
   #wat-callbox .row{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
   #wat-callbox select{font:inherit;border:0;border-radius:6px;padding:2px 4px;background:#2a3942;color:#e9edef}
@@ -3118,6 +3163,14 @@
     if (!isFinite(n)) return 400;
     return Math.round(Math.min(800, Math.max(200, n)));
   }
+  // WhatsApp 网页版通话要麦克风的样子（2026-11 实测）：{audio:{sampleRate:16000, channelCount:1, sampleSize:16, …}, video:false}。
+  // 只认这种请求，录语音消息等别的麦克风请求不碰。
+  function isVoipMicRequest(c) {
+    if (!c || !c.audio || c.video) return false;
+    const a = c.audio;
+    if (a === true || typeof a !== 'object') return false;
+    return Number(a.sampleRate) === 16000 || Number(a.sampleSize) === 16 || Number(a.channelCount) === 1;
+  }
   // 外放模式时，浏览器新开的麦克风带上回声消除和降噪。耳机模式不改 WhatsApp 原来的参数。
   // 只在「通话同传」打开时生效：关掉之后（比如录语音消息）一律不动 WhatsApp 的麦克风参数。
   function speakerMicConstraints(constraints) {
@@ -3906,7 +3959,8 @@
     const box = document.createElement('div');
     box.id = 'wat-callbox';
     box.style.display = 'none';
-    box.innerHTML = '<div class="hd"><b>通话同传</b><span class="st" id="wat-call-st"></span></div>' +
+    box.innerHTML = '<div class="hd"><b>通话同传</b><span class="st" id="wat-call-st"></span>' +
+      '<button type="button" id="wat-call-mini" title="收起 / 展开">–</button><button type="button" id="wat-call-x" title="这通电话不再显示（同传照常工作）">×</button></div>' +
       '<div class="tip" id="wat-call-tip">耳机模式：您的话一直送去翻译。请戴耳机。用扬声器外放时，放出的声音会被麦克风收进去，再翻一遍。</div>' +
       '<div class="row"><span class="lab">听音</span><select id="wat-call-audio">' +
       '<option value="headphone">耳机模式</option><option value="speaker">外放模式</option></select>' +
@@ -3918,6 +3972,16 @@
       '<div class="lab">您说的，译给客户</div><div class="out" id="wat-call-out"></div>' +
       '<div class="orig" id="wat-call-me"></div>';
     document.documentElement.appendChild(box);
+    if (store.get('callBoxMini', false)) box.classList.add('mini');
+    const miniBtn = box.querySelector('#wat-call-mini');
+    const syncMini = () => { miniBtn.textContent = box.classList.contains('mini') ? '▴' : '–'; };
+    syncMini();
+    miniBtn.addEventListener('click', () => {
+      box.classList.toggle('mini');
+      store.set('callBoxMini', box.classList.contains('mini'));
+      syncMini();
+    });
+    box.querySelector('#wat-call-x').addEventListener('click', () => { callBoxDismissed = true; hideCallBox(); });
     const sel = box.querySelector('#wat-call-lang');
     sel.addEventListener('change', () => {
       store.set('callLangMode', sel.value);
@@ -3928,7 +3992,14 @@
     const modeSel = box.querySelector('#wat-call-audio');
     modeSel.addEventListener('change', () => { setCallAudioMode(modeSel.value); });
   }
-  function showCallBox() { ensureCallBox(); const box = document.getElementById('wat-callbox'); if (box) box.style.display = 'block'; paintCall(); }
+  let callBoxDismissed = false; // 点了 ×：这通电话不再弹出，下一通重新显示
+  function showCallBox() {
+    if (callBoxDismissed) return;
+    ensureCallBox();
+    const box = document.getElementById('wat-callbox');
+    if (box) box.style.display = 'block';
+    paintCall();
+  }
   function hideCallBox() { const box = document.getElementById('wat-callbox'); if (box) box.style.display = 'none'; }
 
   function acceptCallLang(lang, strong) {
@@ -4161,10 +4232,15 @@
     callBoundRemote = null;
     syncSpeakerWatch();
   }
-  function buildCallGraph(track) {
+  function buildCallGraph(track, rate) {
     const AC = pageWin().AudioContext || pageWin().webkitAudioContext;
     if (!AC) throw new Error('这个浏览器没有音频接口');
-    if (!callAudio || callAudio.state === 'closed') callAudio = new AC();
+    if (!callAudio || callAudio.state === 'closed') {
+      callAudio = null;
+      // WhatsApp 网页版通话按 16kHz 处理，虚拟麦克风用同样的采样率，避免两边重采样
+      if (rate) { try { callAudio = new AC({ sampleRate: rate, latencyHint: 'interactive' }); } catch (e) { callAudio = null; } }
+      if (!callAudio) callAudio = new AC();
+    }
     if (!callDuck) callDuck = callAudio.createGain();
     if (!callTtsGain) callTtsGain = callAudio.createGain();
     if (!callDest) {
@@ -4192,6 +4268,12 @@
     const v = duckTarget();
     callDuck.gain.value = v;
     try { callDuck.gain.setTargetAtTime(v, callAudio.currentTime, 0.04); } catch (e) {}
+    // 译文只在同传接通时混进去；改回原声时把还在排队的译文也静音
+    if (callTtsGain) {
+      const t = (callEngaged && !callFallback) ? 1 : 0;
+      callTtsGain.gain.value = t;
+      try { callTtsGain.gain.setTargetAtTime(t, callAudio.currentTime, 0.02); } catch (e) {}
+    }
   }
   let callPcmCursor = 0;
   function playCallPcm(b64, rate) {
@@ -4227,7 +4309,8 @@
     callEngaged = false;
     applyCallDuck();
     callSlots.forEach((s) => {
-      if (!s.original) return;
+      // 虚拟麦克风（WhatsApp 网页版）没有 sender：上面 applyCallDuck 已把原声开到 100%、译文静音
+      if (!s.original || !s.sender) return;
       try {
         if (s.sender.track !== s.original) nativeSetTrack(s.sender, s.original);
       } catch (e) {}
@@ -4251,7 +4334,7 @@
     callFallback = false;
     callTold = false;
     callSlots.forEach((s) => {
-      if (s.muted || !s.original) return;
+      if (s.muted || !s.original || !s.sender) return;
       try {
         const p = nativeSetTrack(s.sender, callMixed);
         if (p && p.catch) p.catch(() => deliverOriginal(false, '没法替换通话声音，已保持您的原声'));
@@ -4476,6 +4559,104 @@
     callStreak = { lang: '', n: 0 };
     callMtSeq++;
   }
+  /* ---------- WhatsApp 网页版通话（2026-11 实测，不走 WebRTC 音轨） ----------
+   * 您的声音：WhatsApp 用 getUserMedia({audio:{sampleRate:16000,…}}) 要麦克风 → 自己的 16k AudioContext → 采集处理器 → 数据通道。
+   *   插件在这一步交给它「虚拟麦克风」（callMixed 的克隆）：平时 = 原声 100%；同传接通 = 译文 + 压低的原声。
+   * 对方的声音：WhatsApp 的播放处理器 voip-shared-buffer-playback-processor 接到扬声器。插件另接一路到 MediaStreamDestination，拿去出字幕。
+   * 通话结束 = WhatsApp 把播放用的 AudioContext 关掉。只有这时才拆掉虚拟麦克风；中途关同传或翻译断开，虚拟麦克风继续送原声。 */
+  const VOIP_MARK = { voip: true };
+  let callVoip = null; // { raw, mapped, playCtx, remote, ended }
+  function voipLive() { return !!(callVoip && !callVoip.ended); }
+  async function mapVoipMic(stream) {
+    if (!store.get('callOn', false) || !callHasCreds()) return null;
+    const raw = stream && stream.getAudioTracks && stream.getAudioTracks()[0];
+    if (!raw) return null;
+    if (callVoip && callVoip.mapped) endVoipCall(''); // 上一通没收尾干净
+    if (!callVoip || callVoip.ended) callVoip = { raw: null, mapped: false, playCtx: null, remote: null, ended: false };
+    try {
+      buildCallGraph(raw, 16000);
+      if (callAudio.state !== 'running') {
+        try { await Promise.race([callAudio.resume(), sleep(400)]); } catch (e) {}
+      }
+      if (callAudio.state !== 'running') throw new Error('音频被浏览器暂停');
+    } catch (e) {
+      // 建不起来就让 WhatsApp 用原麦克风，通话不受影响
+      setCallStatus('同传音频没准备好（' + e.message + '），这通电话用您的原声。');
+      return null;
+    }
+    callVoip.raw = raw;
+    callVoip.mapped = true;
+    callSlots = [{ sender: null, original: raw, muted: false }];
+    callEngaged = false; callFallback = false;
+    applyCallDuck(); // 先送 100% 原声，翻译接通后才混译文
+    try { raw.addEventListener('ended', () => { if (callVoip && callVoip.raw === raw) endVoipCall('麦克风断开了，同传已停止'); }); } catch (e) {}
+    const handed = callMixed.clone();
+    callVoip.handed = handed;
+    try { handed.addEventListener('ended', () => { if (callVoip && callVoip.handed === handed) endVoipCall('通话已结束'); }); } catch (e) {}
+    setTimeout(() => { try { callTick(); } catch (e) {} }, 0);
+    return new MediaStream([handed]);
+  }
+  function tapVoipPlayback(node) {
+    if (!store.get('callOn', false) || !rtcApi || !rtcApi.rawConnect) return;
+    const ctx = node.context;
+    if (callVoip && !callVoip.ended && callVoip.playCtx === ctx) return;
+    let track;
+    try {
+      const dest = ctx.createMediaStreamDestination();
+      rtcApi.rawConnect.call(node, dest); // 另接一路，不影响扬声器
+      track = dest.stream.getAudioTracks()[0];
+    } catch (e) { return; }
+    if (!callVoip || callVoip.ended) callVoip = { raw: null, mapped: false, playCtx: null, remote: null, ended: false };
+    callVoip.playCtx = ctx;
+    callVoip.remote = track;
+    callWatchedRemote = track;
+    callBoundRemote = null;
+    try { ctx.addEventListener('statechange', () => { if (ctx.state === 'closed' && callVoip && callVoip.playCtx === ctx) endVoipCall('通话已结束'); }); } catch (e) {}
+    setTimeout(() => { try { callTick(); } catch (e) {} }, 0);
+  }
+  function endVoipCall(why) {
+    const v = callVoip;
+    if (!v) return;
+    v.ended = true;
+    shutdownCall(why || '');
+    if (v.mapped && v.raw) { try { v.raw.stop(); } catch (e) {} } // WhatsApp 拿的是克隆，原麦克风由插件关掉
+    if (callVoip === v) callVoip = null;
+    callBoxDismissed = false;
+    setTimeout(() => { if (!voipLive() && callPhase === 'idle') hideCallBox(); }, 3000);
+  }
+  async function beginVoipCall() {
+    if (callStarting) return;
+    callStarting = true;
+    callPhase = 'starting';
+    callActivePc = VOIP_MARK;
+    callClosing = false;
+    clearCallCaptions();
+    try {
+      callPhase = 'live';
+      setCallStatus('正在连接翻译…');
+      if (callVoip && callVoip.mapped) await startCallOut();
+      else setCallStatus('只出字幕：这通电话开始时同传还没打开，您的声音按原样送出');
+      if (callVoip && callVoip.remote) await startCallIn();
+    } finally {
+      callStarting = false;
+    }
+  }
+
+  function checkVoipEnded() {
+    const v = callVoip;
+    if (!v || v.ended) return;
+    try {
+      if (v.handed && v.handed.readyState === 'ended') return endVoipCall('通话已结束');
+      if (v.playCtx && v.playCtx.state === 'closed') return endVoipCall('通话已结束');
+      if (v.mapped && v.raw && v.raw.readyState === 'ended') return endVoipCall('麦克风断开了，同传已停止');
+    } catch (e) {}
+  }
+  function maintainVoip() {
+    if (callStarting) return;
+    if (!callIn && !callInStarting && callVoip && callVoip.remote && callVoip.remote.readyState === 'live') startCallIn();
+    if (callAudioMode() === 'speaker') syncSpeakerWatch();
+  }
+
   function shutdownCall(why) {
     callClosing = true;
     clearTimeout(callTimers.out); clearTimeout(callTimers.in);
@@ -4485,8 +4666,19 @@
     if (callOut) { try { callOut.close(); } catch (e) {} callOut = null; }
     if (callIn) { try { callIn.close(); } catch (e) {} callIn = null; }
     deliverOriginal(true);
+    // WhatsApp 还拿着虚拟麦克风（通话没结束）：保留音频图，只停翻译，继续送 100% 原声
+    if (callVoip && callVoip.mapped && !callVoip.ended) {
+      if (callLevelTimer) { clearInterval(callLevelTimer); callLevelTimer = null; }
+      callRemoteHot = false; callHeardRemote = false; callLeoHot = false; callGateOpen = true;
+      applyCallDuck();
+      callActivePc = null; callEngaged = false; callFallback = false;
+      callInStarting = false; callStarting = false; callPhase = 'idle';
+      if (why) setCallStatus(why);
+      callClosing = false;
+      return;
+    }
     disarmCallReplace();
-    callSlots.forEach((s) => { try { callManaged.delete(s.sender); } catch (e) {} });
+    callSlots.forEach((s) => { try { if (s.sender) callManaged.delete(s.sender); } catch (e) {} });
     callSlots = [];
     callManaged = new WeakMap();
     if (callMicNode) { try { callMicNode.disconnect(); } catch (e) {} }
@@ -4559,6 +4751,7 @@
     if (!callActivePc || callStarting) return;
     if (callEngaged && callMixed) {
       callSlots.forEach((s) => {
+        if (!s.sender) return;
         const cur = s.sender.track;
         if (!cur) { s.muted = true; return; }
         s.muted = false;
@@ -4589,16 +4782,25 @@
       const on = !!store.get('callOn', false);
       const box = document.getElementById('wat-call');
       if (box && document.activeElement !== box && box.checked !== on) box.checked = on;
+      checkVoipEnded();
       if (!on) {
         if (callActivePc || callPhase === 'live' || callPhase === 'starting' || callEngaged) shutdownCall('');
         hideCallBox();
-        if (rtcApi) rtcApi.onMic = null;
+        if (rtcApi) { rtcApi.onMic = null; rtcApi.mapMic = null; rtcApi.onPlayback = null; }
         return;
       }
-      showCallBox();
       if (!rtcApi) {
-        setCallStatus('没能钩住浏览器的通话接口。请刷新 WhatsApp 后再打开。文字翻译不受影响。');
+        callHint('没能钩住浏览器的通话接口。请刷新 WhatsApp 后再打开。文字翻译不受影响。');
         return;
+      }
+      rtcApi.mapMic = (stream) => mapVoipMic(stream);
+      rtcApi.onPlayback = (node) => tapVoipPlayback(node);
+      // 同传在通话中途才打开：找到正在播放的对方声音，至少出字幕
+      if (!voipLive() && rtcApi.lastPlayback) {
+        const lp = rtcApi.lastPlayback;
+        let alive = false;
+        try { alive = lp.context && lp.context.state !== 'closed'; } catch (e) {}
+        if (alive) tapVoipPlayback(lp); else rtcApi.lastPlayback = null;
       }
       rtcApi.onMic = (stream) => {
         try {
@@ -4609,9 +4811,20 @@
       rtcApi.onRemoteTrack = () => { if (callActivePc && !callIn && !callInStarting) startCallIn(); };
       if (!callHasCreds()) {
         if (callActivePc) shutdownCall('');
-        setCallStatus('请先在 ⚙ 设置 → 通话同传 里填写中转地址。阿里云的长期 Key 只放在你自己的服务器上。只用 OpenAI 时也可以改填 OpenAI Key。没配好之前，对方听到的是您的原声。');
+        callHint('请先在 ⚙ 设置 → 通话同传 里填写中转地址。阿里云的长期 Key 只放在你自己的服务器上。只用 OpenAI 时也可以改填 OpenAI Key。没配好之前，对方听到的是您的原声。', voipLive());
         return;
       }
+      if (voipLive()) {
+        showCallBox();
+        if (callActivePc !== VOIP_MARK) {
+          if (callActivePc) shutdownCall('');
+          beginVoipCall();
+          return;
+        }
+        maintainVoip();
+        return;
+      }
+      if (callActivePc === VOIP_MARK) shutdownCall('通话已结束');
       let pc = null;
       if (callForcedPc) {
         try { if (callForcedPc.connectionState !== 'closed') pc = callForcedPc; } catch (e) { pc = callForcedPc; }
@@ -4619,9 +4832,10 @@
       if (!pc) pc = findCallPc();
       if (!pc) {
         if (callActivePc) shutdownCall('通话已结束');
-        setCallStatus('未检测到 WhatsApp 通话。请用网页版的语音通话（不是在手机上打）。如果这个账号没有网页通话，这里会一直这样。');
+        callHint('同传已打开，等您用网页版打语音电话（手机上打的这里看不到）。');
         return;
       }
+      showCallBox();
       if (pc !== callActivePc) {
         if (callActivePc) shutdownCall('');
         beginCall(pc);
@@ -4630,8 +4844,26 @@
       maintainCall();
     } catch (e) { /* 通话模块出错不能弄坏文字翻译 */ }
   }
+  // 没有通话时不显示浮层（不挡聊天），提示写在工具栏「通话同传」开关的悬停说明里
+  function callHint(text, show) {
+    if (callStatusText !== text) setCallStatus(text);
+    const sw = document.getElementById('wat-call');
+    const lab = sw && (sw.closest('label') || sw.parentElement);
+    if (lab) {
+      if (lab.dataset.watTip == null) lab.dataset.watTip = lab.title || '';
+      const t = lab.dataset.watTip + (text ? '\n\n现在：' + text : '');
+      if (lab.title !== t) lab.title = t;
+    }
+    if (show) showCallBox();
+    else if (callPhase === 'idle' && !voipLive()) hideCallBox();
+  }
   function onCallSettingsSaved() {
     applyCallDuck();
+    if (callActivePc === VOIP_MARK && store.get('callOn', false)) {
+      shutdownCall('正在按新设置重连…');
+      beginVoipCall();
+      return;
+    }
     if (callActivePc && store.get('callOn', false)) {
       const pc = callActivePc;
       const forced = callForcedPc;
@@ -4669,9 +4901,16 @@
       feedTrackId: callFeedTrack ? callFeedTrack.id : '',
       gateTrackId: callGateTrack ? callGateTrack.id : '',
       incomingPlayback: false,
-      senderTrackId: slot && slot.sender.track ? slot.sender.track.id : '',
+      senderTrackId: slot && slot.sender && slot.sender.track ? slot.sender.track.id : '',
       originalTrackId: slot && slot.original ? slot.original.id : '',
-      mixed: !!(slot && callMixed && slot.sender.track === callMixed),
+      mixed: !!(slot && callMixed && slot.sender && slot.sender.track === callMixed),
+      voip: !!voipLive(),
+      lastMicState: callLastMic ? callLastMic.readyState : '',
+      voipMapped: !!(callVoip && callVoip.mapped),
+      voipRemote: !!(callVoip && callVoip.remote),
+      ttsGain: callTtsGain ? callTtsGain.gain.value : -1,
+      duckGain: callDuck ? callDuck.gain.value : -1,
+      boxVisible: !!(box && box.style.display !== 'none'),
       overlay: overlay,
     };
   }

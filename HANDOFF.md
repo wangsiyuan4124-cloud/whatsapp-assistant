@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.8.4**，一个文件，约 4800 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
+当前版本：**v1.8.5**，一个文件，约 4800 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
 
 ## 2. 功能清单
 
@@ -26,7 +26,7 @@
 | PI 形式发票 | AI 从聊天提取 → 右栏表单（缺的标黄）→ 预览 → 生成 A4 PDF 加一张 JPG → 粘贴进 WhatsApp 发送预览（不会自动发送）。英文版和西语版，金额大写，编号 `PI-YYYYMMDD-NNN`，按客户存草稿。开票公司：BOUNDLESS AUTOMOTIVE LIMITED（無界汽車有限公司，香港）。 |
 | 发车型资料 | 右栏「🚗 发车型资料」（子页面）：选车型组（柴油 / 汽油 / EV，按聊天内容猜一个默认值）→ ① 介绍文字（「标准介绍」用资料包里的卖点；「AI 按客户需求写」挑和客户相关的卖点；「✎ 和 AI 改一改」进修改话术页，`openRefine` 的 `opts.back` 让「← 用这条，返回」/ 页头「← 返回」把草稿带回发车型资料页）→ 填入聊天；每个「聊天 | 车型组」的介绍、照片和视频选择、规格书选项记在 `catState`（刷新页面后清空）；② 点选照片；③ 规格书 PDF（英 / 西，可带 CIF 到港价，附一张 JPG 预览图）；④ 视频 → 一次粘贴进发送预览（不会自动发送）。规格书页眉的 logo：资料包根目录的 `logo*.png` 优先（导入时存进 `catalog.logo`），其次用 PI 设置里的 logo。资料包是本地文件夹（见第 10 节），在「设置 → 车型资料」导入：一个 `.json` + 根目录 `logo.png` + 按子文件夹名（如 `diesel+gasoline`、`ev`）分组的照片和视频；照片导入时压缩到 1600px JPG，照片视频存在 IndexedDB `wat-media`。CIF：按版本手动填的优先（用户填的就是含运费的到港价，不需要再填运费）；没填的才用 FOB + 每台运费 + 每台保险费。对外只出现 CIF，不出现 FOB。带价格时：规格书表格下方有一行说明「CIF 只含到港海运费和保险，不含进口关税、当地税费、港杂费和内陆运输」（英 / 西），标准介绍的价格行也带简短说明；车型参数和 CIF 价会加进所有 AI 提示词（`catalogContext`，不含 FOB），并要求 AI 报价时说明 CIF 不含哪些费用、不估落地价。 |
 | 设置 | ⚙ 打开，标签页：基本设置（DeepSeek Key、业务介绍、价格表与交易条款、分级标准、自动加入列表开关）、通话同传、PI 发票（公司、银行、Logo、公章、默认条款）、话术库。 |
-| 通话同传 | 默认关闭。打开后：网页语音通话里，客户的声音出中文字幕；Leo 的中文被译成客户的语言并合成语音，用 `replaceTrack` 送给对方，原声按音量垫在下面。翻译断开就放回原麦克风。说明见 README「通话同传」。可选中转在 `call-relay/`。轻量服务器部署（整夹可删）：[call-relay/deploy/README.md](call-relay/deploy/README.md)。 |
+| 通话同传 | 默认关闭。打开后：网页语音通话里，客户的声音出中文字幕；Leo 的中文被译成客户的语言并合成语音，送给对方（WhatsApp 网页版走「虚拟麦克风」，见坑 13），原声按音量垫在下面。翻译断开就改回 100% 原声。说明见 README「通话同传」。可选中转在 `call-relay/`。轻量服务器部署（整夹可删）：[call-relay/deploy/README.md](call-relay/deploy/README.md)。 |
 
 ## 3. 代码结构（按文件里的分节注释）
 
@@ -75,6 +75,12 @@
 10. 说明文字要跟默认引擎一致：阿里云（默认）时**双方语音都经过 call-relay 再到阿里云北京**；只有 OpenAI 时中转才「只换临时密钥、语音不经过」。v1.8.3 之前设置页和 README 把 OpenAI 时期的说法留给了默认的阿里云，已改。
 11. **WhatsApp 网页的 CSP 会拦网页自己的 WebSocket / fetch**：`connect-src` 只允许 WhatsApp / Facebook 自己的域名（2026-11 实测响应头）。所以插件连中转**不能**用 `new WebSocket`，v1.8.4 起阿里云通道走 `openRelayChannel`：经 `GM_xmlhttpRequest` 调中转的 `/aliyun/open`、`/aliyun/send`（批量 POST）、`/aliyun/poll`（长轮询，最多等 20 秒，有事件立即返回）、`/aliyun/close`，中转再用 WebSocket 连阿里云。`t15` 会检查通话期间 `new WebSocket` 次数为 0。OpenAI 引擎用 WebRTC + `GM_xmlhttpRequest`，不受影响。测试页是本地文件，没有 CSP，测不出这类问题，新加网络连接时要先想到这一点。
 12. **实际部署（2026-11）**：腾讯云轻量上海那台（Ubuntu 24.04，公网 IP 见控制台，不写进公开仓库）上已有 CRM 网站（nginx 占 80/443，证书是自动续期的 Let's Encrypt IP 证书 `/etc/nginx/ssl/ip.crt`）、dealer-rewrite（18443）等。所以**没有用 Caddy**（装过但关着，别启动，会和 nginx 抢 80）：中转程序在 `/opt/call-relay`（`callrelay` 用户，systemd `call-relay`，Node 是 `/usr/bin/node`），nginx 新加独立文件 `/etc/nginx/conf.d/call-relay.conf` 监听 **8443**、复用同一张证书、不记访问日志；防火墙放行 TCP 8443。插件中转地址填 `https://<公网IP>:8443/session`。密钥在 `/etc/call-relay.env`（root 600）。更新中转：替换 `/opt/call-relay` 里的 `server.js`、`wsutil.js` 后 `systemctl restart call-relay`。
+13. **WhatsApp 网页版通话不用 WebRTC 音轨**（2026-11 在真通话里抓的）：它的 RTCPeerConnection 只有数据通道（sctp，`negotiated:true,id:0`），没有音频 transceiver，所以 `replaceTrack` / 找音轨的老办法一直显示「未检测到通话」。实际流程：
+    - 麦克风：`getUserMedia({video:false,audio:{sampleRate:16000,channelCount:1,sampleSize:16,echoCancellation…}})` → 自己的 16k `AudioContext` → `AudioWorkletNode('voip-shared-buffer-capture-processor')`。通话前还会用 `{audio:true}` 探一次，不能动它。
+    - 对方声音：另一个 16k `AudioContext` → `AudioWorkletNode('voip-shared-buffer-playback-processor')` → `connect(ctx.destination)`。挂断时两个 context 都被关掉。
+    - v1.8.5 的做法：`isVoipMicRequest` 认出这种麦克风请求，同传打开时 `mapVoipMic` 交回 `callMixed` 的克隆（虚拟麦克风：未接通翻译时 = 100% 原声，接通后 = 译文 + 压低的原声），原麦克风留给翻译。`AudioNode.prototype.connect` 钩子看到 playback 处理器接扬声器时，`tapVoipPlayback` 另接一路 `MediaStreamDestination` 出字幕。挂断判断：WhatsApp 停掉虚拟麦克风、或播放 context 变成 closed。中途关同传只停翻译，虚拟麦克风继续送原声（不能断，否则对方听成静音）。通话开始时同传没开，就只能出字幕（麦克风已经给出去了）。
+    - `t16` 用本机临时 http 服务照这个流程模拟（文件页里 AudioWorklet 加载不了模块）。`t14` 仍测老的 RTCPeerConnection 路径。WhatsApp 以后改了处理器名字或采样率，要重新在真通话里抓一次。
+    - 浮层：没通话时不显示（提示写在工具栏开关的悬停说明里）；右栏打开时贴在右栏底部；有「–」收起和「×」本通不再显示。
 
 ## 6. 产品决定和用户偏好
 
@@ -98,7 +104,7 @@
 
 - `app.js` 用 Lexical 搭了一个模拟输入框（`npm run build` 打包成 `app.bundle.js`）。`page*.html` 是逐步加了功能的模拟 WhatsApp 页面：消息行、列表菜单、`GM_*` 函数、模拟的翻译和 DeepSeek 返回。
 - `page6.html` 起，模拟页面会把「按 Esc 关聊天」计数（`chatClosed`）。`#keep` 参数模拟「点菜单项后菜单不关」的情况。
-- `t01`–`t12` 是 Playwright 脚本（`t10` 测 AI 发送翻译、术语表和失败退回；`t11` 测对方消息 AI 翻译；`t12` 测学习你的回复方式；`t13` 测车型资料，用 `fixtures/catalog/` 里的假资料包，价格都是假的）。`t03`–`t10` 设置了 Key，所以先设 `aiIn=false`，免得对方消息的 AI 翻译打乱它们对 DeepSeek 调用次数的统计，输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
+- `t01`–`t12` 是 Playwright 脚本（`t16` 模拟 WhatsApp 网页版通话；`t10` 测 AI 发送翻译、术语表和失败退回；`t11` 测对方消息 AI 翻译；`t12` 测学习你的回复方式；`t13` 测车型资料，用 `fixtures/catalog/` 里的假资料包，价格都是假的）。`t03`–`t10` 设置了 Key，所以先设 `aiIn=false`，免得对方消息的 AI 翻译打乱它们对 DeepSeek 调用次数的统计，输出关键结果，需要人工核对（不是断言式测试）。`t08`、`t09` 把脚本包在沙箱 Proxy 里运行，更接近 Tampermonkey 的真实环境。
 - 环境变量 `SCRIPT` 可以指定要测的脚本文件。
 - 模拟页面测不出 WhatsApp 改版的影响，重要改动发布后要请用户在真实页面上确认一次。
 
