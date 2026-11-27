@@ -13,8 +13,8 @@ function assert(cond, msg) {
 }
 const VOIP = { video: false, audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleSize: 16 } };
 const WORKLET = [
-  'class P extends AudioWorkletProcessor { constructor(){super();this.p=0;}',
-  '  process(i,o){const ch=o[0][0];for(let k=0;k<ch.length;k++){ch[k]=0.3*Math.sin(this.p);this.p+=2*Math.PI*440/sampleRate;}return true;} }',
+  'class P extends AudioWorkletProcessor { constructor(){super();this.p=0;this.a=0.3;this.port.onmessage=(e)=>{this.a=e.data;};}',
+  '  process(i,o){const ch=o[0][0];for(let k=0;k<ch.length;k++){ch[k]=this.a*Math.sin(this.p);this.p+=2*Math.PI*440/sampleRate;}return true;} }',
   "registerProcessor('voip-shared-buffer-playback-processor', P);",
   'class C extends AudioWorkletProcessor { process(){return true;} }',
   "registerProcessor('voip-shared-buffer-capture-processor', C);",
@@ -102,6 +102,7 @@ const WORKLET = [
     window.__an = an;
     const node = new AudioWorkletNode(play, 'voip-shared-buffer-playback-processor', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
     node.connect(play.destination);
+    window.__playNode = node;
     return { id: t.id, isAwn: node instanceof AudioWorkletNode };
   }, { c: VOIP, w: WORKLET });
   assert(call.isAwn, 'WhatsApp worklet node is still a real AudioWorkletNode');
@@ -136,6 +137,35 @@ const WORKLET = [
   await page.evaluate(() => window.__WAT_CALL__.setOn(true));
   s = await waitFor((x) => x.engaged && x.ttsGain === 1, 're-engage');
   assert(s.engaged && s.boxVisible, 'switched back on mid-call: translation re-engaged');
+
+  // 外放模式（没有耳机时用）：对方一出声，就不把麦克风送去翻译、送给对方的原声也静音；
+  // 对方停口、过了尾音、Leo 开口后才恢复
+  await page.evaluate(() => {
+    GM_setValue('callSpeakerHangMs', 300);
+    GM_setValue('callRemoteRms', 0.02);
+    GM_setValue('callLocalRms', 0.03);
+    const sel = document.getElementById('wat-call-audio');
+    sel.value = 'speaker';
+    sel.dispatchEvent(new Event('change'));
+  });
+  s = await waitFor((x) => x.audioMode === 'speaker' && x.remoteHot && x.gateOpen === false && x.duckGain === 0, 'speaker gate closes');
+  assert(s.audioMode === 'speaker' && s.remoteHot && s.gateOpen === false, 'speaker: customer voice from the playback processor closes the gate ' + s.lastRemoteRms);
+  assert(s.duckGain === 0, 'speaker: original voice to the customer muted while they speak (no echo back)');
+  assert(s.feedTrackId && s.feedTrackId === s.gateTrackId && s.feedTrackId !== s.originalTrackId, 'speaker: translator gets the gated mic');
+  await page.evaluate(() => window.__playNode.port.postMessage(0));
+  s = await waitFor((x) => !x.remoteHot && x.heardRemote, 'remote quiet');
+  assert(!s.remoteHot, 'speaker: customer stops, hot flag clears');
+  // 假设备麦克风一直有「嘀」声，相当于 Leo 在说话：门应重新打开
+  s = await waitFor((x) => x.gateOpen && x.leoHot, 'reopen', 3000);
+  assert(s.gateOpen && s.leoHot && Math.abs(s.duckGain - 0.15) < 0.01, 'speaker: Leo speaks, gate reopens and ducked original returns ' + s.lastLocalRms);
+  await page.evaluate(() => {
+    window.__playNode.port.postMessage(0.3);
+    const sel = document.getElementById('wat-call-audio');
+    sel.value = 'headphone';
+    sel.dispatchEvent(new Event('change'));
+  });
+  s = await waitFor((x) => x.audioMode === 'headphone' && x.gateOpen, 'back to headphone');
+  assert(s.gateOpen, 'back to headphone mode: continuous capture');
 
   // 浮层：收起 / 右栏打开时放到右栏底部，不压在聊天上
   await page.click('#wat-call-mini');
