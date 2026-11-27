@@ -67,7 +67,9 @@ function once(server, method, path, headers, body) {
   const upstream = http.createServer();
   const seenAuth = [];
   const seenMsg = [];
+  const upSockets = [];
   upstream.on('upgrade', (req, socket) => {
+    upSockets.push(socket);
     seenAuth.push(req.headers.authorization || '');
     const peer = acceptBrowser(req, socket);
     if (!peer) return;
@@ -101,7 +103,43 @@ function once(server, method, path, headers, body) {
     assert(forwarded.type === 'session.created', 'proxies aliyun events');
     assert(seenAuth.indexOf('Bearer sk-aliyun') >= 0, 'upstream sees the server key, not the relay key');
     assert(seenMsg.some((t) => t.indexOf('session.update') >= 0), 'forwards client session.update');
+
+    // HTTP 通道（插件在 WhatsApp 网页里用 GM_xmlhttpRequest 走这条，不受网页安全策略限制）
+    const auth = { 'Content-Type': 'application/json', Authorization: 'Bearer secret' };
+    const noKey = await once(relay, 'POST', '/aliyun/open', { 'Content-Type': 'application/json' }, '{}');
+    assert(noKey.status === 401, 'http channel rejects missing relay key');
+    const opened = await once(relay, 'POST', '/aliyun/open', auth, '{}');
+    const sid = JSON.parse(opened.body).id;
+    assert(opened.status === 200 && /^[0-9a-f]{24}$/.test(sid), 'http channel opens a session');
+    const before = seenMsg.length;
+    const sent = await once(relay, 'POST', '/aliyun/send?id=' + sid, auth, JSON.stringify([
+      JSON.stringify({ type: 'session.update', session: { output_modalities: ['text', 'audio'] } }),
+      JSON.stringify({ type: 'input_audio_buffer.append', audio: 'AAAA' }),
+    ]));
+    assert(sent.status === 200, 'http channel accepts a batch');
+    const polled = await once(relay, 'POST', '/aliyun/poll?id=' + sid, auth, '{}');
+    const got = JSON.parse(polled.body);
+    assert(polled.status === 200 && got.events.length >= 1 && JSON.parse(got.events[0]).type === 'session.created', 'http poll returns upstream events ' + polled.body.slice(0, 120));
+    await new Promise((r) => setTimeout(r, 100));
+    assert(seenMsg.slice(before).some((t) => t.indexOf('input_audio_buffer.append') >= 0), 'http send reaches upstream in order');
+    await once(relay, 'POST', '/aliyun/poll?id=' + sid, auth, '{}'); // 取走剩下的回显
+    const t0 = Date.now();
+    const pollWait = once(relay, 'POST', '/aliyun/poll?id=' + sid, auth, '{}');
+    await new Promise((r) => setTimeout(r, 300));
+    await once(relay, 'POST', '/aliyun/send?id=' + sid, auth, JSON.stringify([JSON.stringify({ type: 'ping' })]));
+    const waited = JSON.parse((await pollWait).body);
+    const took = Date.now() - t0;
+    assert(waited.events.length >= 1 && took >= 250 && took < 3000, 'long poll waits, then returns as soon as an event arrives (' + took + 'ms)');
+    const wrongId = await once(relay, 'POST', '/aliyun/poll?id=nope', auth, '{}');
+    assert(wrongId.status === 404, 'unknown session is 404');
+    const closed = await once(relay, 'POST', '/aliyun/close?id=' + sid, auth, '{}');
+    const afterClose = await once(relay, 'POST', '/aliyun/poll?id=' + sid, auth, '{}');
+    assert(closed.status === 200 && afterClose.status === 404, 'close removes the session');
   } finally {
+    // Node 自带的 http 客户端会保持空闲连接，不关掉的话 server.close 永远等不到
+    try { relay.hub.stop(); } catch (e) {}
+    upSockets.forEach((s) => { try { s.destroy(); } catch (e) {} });
+    [relay, upstream].forEach((s) => { try { s.closeAllConnections(); } catch (e) {} });
     await new Promise((r) => relay.close(r));
     await new Promise((r) => upstream.close(r));
   }

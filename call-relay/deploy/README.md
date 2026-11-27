@@ -7,7 +7,8 @@
 先看两件做不到的事：
 
 - 没有备案域名时，只能暂时用「公网 IP + HTTPS」。腾讯云可以随时按未备案网站的规则把 80、443 或你用来对外的端口关掉。这不是 Caddy 能解决的。备案完成之前，把它当成临时办法。
-- 插件在 WhatsApp 网页里创建 WebSocket（见仓库 `HANDOFF.md` 第 1 节：脚本是 `@inject-into page`）。`@connect *` 只对 Tampermonkey 自己的 `GM_xmlhttpRequest` 生效，挡不住网页自己的安全策略。如果 WhatsApp 的 `connect-src` 拦住了到这台服务器的 `wss://`，浮层会报错，通话自动改回你的原声。这和中转有没有配好是两件事。
+- （已解决，v1.8.4）WhatsApp 网页的 `connect-src` 确实会拦住网页里连到这台服务器的 `wss://`。插件现在改用 Tampermonkey 的 `GM_xmlhttpRequest` 走中转的 HTTP 接口（`/aliyun/open` 等），不受这条限制。第一次通话时 Tampermonkey 可能会弹窗问是否允许访问这台服务器，选「总是允许」。
+- **服务器上已经有 nginx 占着 80/443 时**（比如已有网站），不要再装或启动 Caddy。可以像本项目实际部署那样：新建一个独立的 `/etc/nginx/conf.d/call-relay.conf`，`listen 8443 ssl`，复用现有证书，`location /` 反代到 `127.0.0.1:8787`（`proxy_buffering off`、`proxy_read_timeout` 调长），`location = /aliyun` 再加 WebSocket 的 `Upgrade` / `Connection` 头，`access_log off`。见 `HANDOFF.md` 第 5 节第 12 条。
 
 一条通话的音频经过中转，大约不到 1 Mbps。3 Mbps 够一个人打电话。打电话时不要再下大文件。
 

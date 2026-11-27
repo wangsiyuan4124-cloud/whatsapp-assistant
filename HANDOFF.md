@@ -6,7 +6,7 @@
 
 一个 Tampermonkey 用户脚本，运行在 **WhatsApp Business 网页版**（web.whatsapp.com，Chrome）上。使用者是奇瑞威麟（Chery RELY）汽车出口经销商，客户主要在中美洲和加勒比（伯利兹、多米尼加、巴拿马、洪都拉斯等），说英语或西班牙语。
 
-当前版本：**v1.8.3**，一个文件，约 4800 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
+当前版本：**v1.8.4**，一个文件，约 4800 行，没有构建步骤。脚本改为 `@run-at document-start`、`@inject-into page`，好让通话钩子赶在 WhatsApp 创建 `RTCPeerConnection` 之前装上。`@require` 的 PDF 库仍会先加载，第一次安装时钩子可能偏晚，刷新一次即可。
 
 ## 2. 功能清单
 
@@ -73,6 +73,8 @@
 8. 谷歌 / 微软是逐字直译，会出中式英语（例：「二手车」→ second-hand car，当地说 used car）。所以发送翻译默认用 AI，术语表兜底。
 9. 通话同传的钩子在功能关闭时也不能把音轨换掉。送给翻译服务的必须是原始麦克风，不能是已经混进译文的那条，否则会自己翻自己。翻译失败要 `replaceTrack` 回原麦克风。`t14` 覆盖这三件事。真 WhatsApp 通话这个测试环境打不了。`getUserMedia` 钩子一直装着，所以外放模式改麦克风参数（`speakerMicConstraints`）必须同时判断 `callOn`，否则关掉同传后录语音消息也会被改参数（v1.8.3 修过，`t14` 有检查）。
 10. 说明文字要跟默认引擎一致：阿里云（默认）时**双方语音都经过 call-relay 再到阿里云北京**；只有 OpenAI 时中转才「只换临时密钥、语音不经过」。v1.8.3 之前设置页和 README 把 OpenAI 时期的说法留给了默认的阿里云，已改。
+11. **WhatsApp 网页的 CSP 会拦网页自己的 WebSocket / fetch**：`connect-src` 只允许 WhatsApp / Facebook 自己的域名（2026-11 实测响应头）。所以插件连中转**不能**用 `new WebSocket`，v1.8.4 起阿里云通道走 `openRelayChannel`：经 `GM_xmlhttpRequest` 调中转的 `/aliyun/open`、`/aliyun/send`（批量 POST）、`/aliyun/poll`（长轮询，最多等 20 秒，有事件立即返回）、`/aliyun/close`，中转再用 WebSocket 连阿里云。`t15` 会检查通话期间 `new WebSocket` 次数为 0。OpenAI 引擎用 WebRTC + `GM_xmlhttpRequest`，不受影响。测试页是本地文件，没有 CSP，测不出这类问题，新加网络连接时要先想到这一点。
+12. **实际部署（2026-11）**：腾讯云轻量上海那台（Ubuntu 24.04，公网 IP 见控制台，不写进公开仓库）上已有 CRM 网站（nginx 占 80/443，证书是自动续期的 Let's Encrypt IP 证书 `/etc/nginx/ssl/ip.crt`）、dealer-rewrite（18443）等。所以**没有用 Caddy**（装过但关着，别启动，会和 nginx 抢 80）：中转程序在 `/opt/call-relay`（`callrelay` 用户，systemd `call-relay`，Node 是 `/usr/bin/node`），nginx 新加独立文件 `/etc/nginx/conf.d/call-relay.conf` 监听 **8443**、复用同一张证书、不记访问日志；防火墙放行 TCP 8443。插件中转地址填 `https://<公网IP>:8443/session`。密钥在 `/etc/call-relay.env`（root 600）。更新中转：替换 `/opt/call-relay` 里的 `server.js`、`wsutil.js` 后 `systemctl restart call-relay`。
 
 ## 6. 产品决定和用户偏好
 

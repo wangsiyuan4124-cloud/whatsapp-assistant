@@ -3,7 +3,10 @@
 浏览器不能把长期 API Key 放在网页里，也不能在 WebSocket 握手上自己加 `Authorization`。这个小服务跑在你自己的云服务器上（旁边已有 Java / PostgreSQL 没关系，它不用数据库）：
 
 - `POST /session`：用 OpenAI Key 换一个短时密钥。只有还要用 OpenAI 引擎时才需要。
-- `GET /aliyun`（WebSocket）：浏览器把音频 JSON 发到这里，服务器带上百炼 Key 去连北京的实时翻译，再把结果转回来。语音经过这台机器，Key 不进浏览器。
+- `POST /aliyun/open`、`/aliyun/send?id=`、`/aliyun/poll?id=`、`/aliyun/close?id=`（HTTP，插件实际用的）：插件经 Tampermonkey 的 `GM_xmlhttpRequest` 把音频 JSON 批量 POST 过来，再用长轮询取回结果；服务器带上百炼 Key 去连北京的实时翻译。鉴权是 `Authorization: Bearer <RELAY_KEY>`。之所以不用 WebSocket：WhatsApp 网页的安全策略（`connect-src`）会拦住网页里连到别的域名的 WebSocket。
+- `GET /aliyun`（WebSocket）：同样的转发，留给不在 WhatsApp 网页里的客户端用。
+
+两种方式语音都经过这台机器，Key 不进浏览器。
 
 ## 百炼（默认）
 

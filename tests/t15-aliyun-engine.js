@@ -41,35 +41,49 @@ function assert(cond, msg) {
   assert(phrases.defaults[0] === 'aliyun' && phrases.defaults[1] === 'aliyun', 'default engine is Alibaba');
 
   await page.evaluate(() => {
+    // 假中转：模拟 call-relay 的 HTTP 通道（open / send / poll / close），插件经 GM_xmlhttpRequest 访问。
+    // WhatsApp 网页的 connect-src 会拦住网页自己的 WebSocket，所以这里一旦有人 new WebSocket 就记下来，最后检查为 0。
     window.__sockets = [];
-    function FakeWS(url) {
-      this.url = url;
-      this.readyState = 0;
-      this.sent = [];
-      window.__sockets.push(this);
+    window.__wsCount = 0;
+    const RealWS = window.WebSocket;
+    window.WebSocket = function () { window.__wsCount++; return new RealWS(...arguments); };
+    function Sess(url, auth) {
+      this.url = url; this.auth = auth; this.sent = []; this.queue = []; this.waiter = null; this.closed = false;
       const self = this;
-      setTimeout(() => {
-        self.readyState = 1;
-        if (self.onopen) self.onopen();
-        if (self.onmessage) self.onmessage({ data: JSON.stringify({ type: 'session.created' }) });
-      }, 15);
+      setTimeout(() => self.push({ type: 'session.created' }), 15);
     }
-    FakeWS.prototype.send = function (data) {
-      const msg = JSON.parse(data);
-      this.sent.push(msg);
-      if (msg.type === 'session.update' && this.onmessage) {
-        const self = this;
-        setTimeout(() => self.onmessage({ data: JSON.stringify({ type: 'session.updated', session: msg.session }) }), 5);
+    Sess.prototype.push = function (obj) {
+      this.queue.push(JSON.stringify(obj));
+      if (this.waiter) { const w = this.waiter; this.waiter = null; w(); }
+    };
+    Sess.prototype.server = function (obj) { this.push(obj); };
+    const prevGM = window.GM_xmlhttpRequest;
+    window.GM_xmlhttpRequest = (o) => {
+      const m = /\/aliyun\/(open|send|poll|close)(?:\?id=(\d+))?$/.exec(o.url || '');
+      if (!m) return prevGM(o);
+      const reply = (status, body) => setTimeout(() => o.onload({ status, responseText: JSON.stringify(body) }), 2);
+      const auth = (o.headers && o.headers.Authorization) || '';
+      if (m[1] === 'open') {
+        const s = new Sess(o.url, auth);
+        window.__sockets.push(s);
+        return reply(200, { id: String(window.__sockets.length - 1) });
       }
+      const s = window.__sockets[Number(m[2])];
+      if (!s || s.closed) return reply(404, { error: 'no such session' });
+      if (m[1] === 'send') {
+        JSON.parse(o.data).forEach((t) => {
+          const msg = JSON.parse(t);
+          s.sent.push(msg);
+          if (msg.type === 'session.update') setTimeout(() => s.push({ type: 'session.updated', session: msg.session }), 5);
+        });
+        return reply(200, { ok: true });
+      }
+      if (m[1] === 'close') { s.closed = true; return reply(200, { ok: true }); }
+      const flush = () => reply(200, { events: s.queue.splice(0), closed: s.closed });
+      if (s.queue.length) return flush();
+      s.waiter = flush;
+      setTimeout(() => { if (s.waiter === flush) { s.waiter = null; flush(); } }, 300);
     };
-    FakeWS.prototype.close = function () {
-      this.readyState = 3;
-      if (this.onclose) this.onclose();
-    };
-    FakeWS.prototype.server = function (obj) {
-      if (this.onmessage) this.onmessage({ data: JSON.stringify(obj) });
-    };
-    window.WebSocket = FakeWS;
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const ctx = new Ctx();
     const osc = ctx.createOscillator();
@@ -107,8 +121,10 @@ function assert(cond, msg) {
   }, 'outgoing session.update missing');
   assert(outUpdate.session.output_modalities.indexOf('audio') >= 0, 'live outgoing asks for audio');
   assert(outUpdate.session.translation.corpus.phrases['瑞虎'] === 'Tiggo', 'corpus sent on the socket');
-  const url = await page.evaluate(() => window.__sockets[0].url);
-  assert(url.indexOf('wss://relay.example/aliyun?k=secret') === 0, 'connects via the relay ' + url);
+  const first = await page.evaluate(() => ({ url: window.__sockets[0].url, auth: window.__sockets[0].auth, ws: window.__wsCount }));
+  assert(first.url === 'https://relay.example/aliyun/open' && first.auth === 'Bearer secret', 'connects via the relay over GM_xmlhttpRequest ' + JSON.stringify(first));
+  const audioSent = await wait(() => window.__sockets[0].sent.some((m) => m.type === 'input_audio_buffer.append'), 'no audio reached the relay');
+  assert(audioSent, 'microphone audio is sent through the relay channel');
 
   await page.evaluate(() => {
     window.__sockets[0].server({ type: 'response.audio_transcript.delta', delta: 'The Tiggo is ready' });
@@ -150,6 +166,23 @@ function assert(cond, msg) {
   const after = await page.evaluate(() => window.__WAT_CALL__.state());
   assert(again.session.translation.language === 'en' || again.session.translation.language === 'es', 'reconnected session keeps a target language ' + again.session.translation.language);
   assert(after.fallback === false, '60s silence reconnect does not fall back to the raw mic ' + after.status);
+  assert(await page.evaluate(() => window.__wsCount) === 0, 'never uses the page WebSocket (WhatsApp connect-src would block it)');
+
+  // 中转连不上（会话一打开就被关掉）：要让启动失败并改回原声，不能一直卡在「正在连接」
+  await page.evaluate(() => {
+    const prev = window.GM_xmlhttpRequest;
+    window.GM_xmlhttpRequest = (o) => {
+      if (/\/aliyun\/open$/.test(o.url || '')) return setTimeout(() => o.onload({ status: 503, responseText: '{"error":"aliyun not configured"}' }), 2);
+      return prev(o);
+    };
+    window.__WAT_CALL__.failOut && window.__WAT_CALL__.failOut();
+    window.__sockets.forEach((s) => { s.closed = true; if (s.waiter) { const w = s.waiter; s.waiter = null; w(); } });
+  });
+  const down = await wait(() => {
+    const st = window.__WAT_CALL__.state();
+    return st.fallback ? st : null;
+  }, 'relay down did not fall back to the original mic');
+  assert(down.fallback === true && /原声/.test(down.status), 'relay down falls back to the original mic: ' + down.status);
 
   await browser.close();
   if (process.exitCode) process.exit(process.exitCode);

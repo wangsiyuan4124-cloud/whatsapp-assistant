@@ -10,6 +10,7 @@
 
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { URL } = require('url');
 const { acceptBrowser, connectUpstream, aliyunUpstreamUrl } = require('./wsutil');
 
@@ -77,11 +78,132 @@ function forwardOpenAI(target, openaiKey, body) {
   });
 }
 
+/* ---------- 阿里云 HTTP 通道 ----------
+ * WhatsApp 网页的安全策略（connect-src）不允许连到我们的服务器，网页里的 WebSocket 会被拦。
+ * 插件改用 Tampermonkey 的 GM_xmlhttpRequest（不受网页策略限制）走这几个 HTTP 接口：
+ *   POST /aliyun/open          → 本服务去连阿里云，返回 {id}
+ *   POST /aliyun/send?id=      → body 是 JSON 字符串数组，逐条转给阿里云
+ *   POST /aliyun/poll?id=      → 长轮询，等最多 POLL_MS，返回 {events:[阿里云原文…], closed}
+ *   POST /aliyun/close?id=     → 关掉
+ * 鉴权都用 Authorization: Bearer <RELAY_KEY>。60 秒没人来取/送就自动关掉。
+ */
+const POLL_MS = 20000;
+const IDLE_MS = 60000;
+const MAX_SESSIONS = 8;
+const MAX_QUEUE = 3000;
+
+function makeHub(deps) {
+  const sessions = new Map();
+  const wake = (s) => {
+    if (!s.waiter) return;
+    const w = s.waiter;
+    s.waiter = null;
+    clearTimeout(w.timer);
+    w.flush();
+  };
+  const finish = (s) => {
+    if (s.closed) return;
+    s.closed = true;
+    try { if (s.upstream) s.upstream.close(); } catch (e) {}
+    wake(s);
+  };
+  const push = (s, text) => {
+    s.queue.push(text);
+    if (s.queue.length > MAX_QUEUE) { s.queue.splice(0, s.queue.length - MAX_QUEUE); finish(s); }
+    wake(s);
+  };
+  const timer = setInterval(() => {
+    const now = Date.now();
+    sessions.forEach((s, id) => {
+      if (now - s.lastSeen > IDLE_MS) { finish(s); sessions.delete(id); }
+      else if (s.closed && !s.waiter && !s.queue.length && now - s.lastSeen > 5000) sessions.delete(id);
+    });
+  }, 5000);
+  if (timer.unref) timer.unref();
+
+  function open() {
+    const upstreamUrl = deps.aliyunUrl || aliyunUpstreamUrl(deps.aliyunWorkspace, deps.aliyunModel);
+    if (!upstreamUrl || !deps.dashscopeKey) return { status: 503, body: { error: 'aliyun not configured' } };
+    if (sessions.size >= MAX_SESSIONS) return { status: 429, body: { error: 'too many sessions' } };
+    const id = crypto.randomBytes(12).toString('hex');
+    const s = { id, queue: [], waiter: null, upstream: null, pending: [], closed: false, lastSeen: Date.now() };
+    sessions.set(id, s);
+    const connect = deps.connectUpstream || connectUpstream;
+    connect(upstreamUrl, { Authorization: 'Bearer ' + deps.dashscopeKey }).then((up) => {
+      if (s.closed) { try { up.close(); } catch (e) {} return; }
+      s.upstream = up;
+      s.pending.splice(0).forEach((t) => up.send(t));
+      up.onFrame((t) => push(s, t));
+      up.onClose(() => finish(s));
+    }).catch((e) => {
+      push(s, JSON.stringify({ type: 'error', error: { message: 'relay: ' + ((e && e.message) || 'upstream failed') } }));
+      finish(s);
+    });
+    return { status: 200, body: { id } };
+  }
+  function get(id) {
+    const s = sessions.get(String(id || ''));
+    if (s) s.lastSeen = Date.now();
+    return s;
+  }
+  function sendMany(s, list) {
+    list.forEach((t) => {
+      if (typeof t !== 'string') t = JSON.stringify(t);
+      if (s.upstream) s.upstream.send(t);
+      else if (s.pending.length < 400) s.pending.push(t);
+    });
+  }
+  function poll(s, res) {
+    if (s.waiter) wake(s); // 同一时间只留一个等待中的请求
+    const flush = () => {
+      const events = s.queue.splice(0);
+      const closed = s.closed && !s.queue.length;
+      s.lastSeen = Date.now();
+      send(res, 200, { events, closed });
+      if (closed) sessions.delete(s.id);
+    };
+    if (s.queue.length || s.closed) { flush(); return; }
+    const w = { flush, timer: setTimeout(() => { if (s.waiter === w) { s.waiter = null; flush(); } }, POLL_MS) };
+    s.waiter = w;
+    res.on('close', () => { if (s.waiter === w) { s.waiter = null; clearTimeout(w.timer); } });
+  }
+  function close(s) { finish(s); sessions.delete(s.id); }
+  // 关服务时把所有会话（以及到阿里云的连接）一起关掉
+  const stop = () => { clearInterval(timer); sessions.forEach((s) => finish(s)); sessions.clear(); };
+  return { open, get, sendMany, poll, close, sessions, stop };
+}
+
+async function handleAliyunHttp(req, res, deps, path) {
+  if (!deps.relayKey || bearer(req) !== deps.relayKey) { send(res, 401, { error: 'bad relay key' }); return; }
+  const hub = deps.hub;
+  if (path === '/aliyun/open') { const r = hub.open(); send(res, r.status, r.body); return; }
+  let id = '';
+  try { id = new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('id') || ''; } catch (e) { id = ''; }
+  const s = hub.get(id);
+  if (!s) { send(res, 404, { error: 'no such session', closed: true }); return; }
+  if (path === '/aliyun/send') {
+    let list;
+    try { list = JSON.parse(await readBody(req, 4 * 1024 * 1024) || '[]'); } catch (e) { send(res, 400, { error: 'bad json' }); return; }
+    if (!Array.isArray(list)) list = [list];
+    if (s.closed) { send(res, 410, { error: 'closed', closed: true }); return; }
+    hub.sendMany(s, list);
+    send(res, 200, { ok: true });
+    return;
+  }
+  if (path === '/aliyun/poll') { hub.poll(s, res); return; }
+  if (path === '/aliyun/close') { hub.close(s); send(res, 200, { ok: true }); return; }
+  send(res, 404, { error: 'not found' });
+}
+
 async function handle(req, res, deps) {
   if (req.method === 'OPTIONS') { send(res, 204, ''); return; }
   const path = (req.url || '/').split('?')[0];
   if (req.method === 'GET' && (path === '/' || path === '/health')) {
     send(res, 200, { ok: true });
+    return;
+  }
+  if (req.method === 'POST' && path.indexOf('/aliyun/') === 0 && deps.hub) {
+    await handleAliyunHttp(req, res, deps, path);
     return;
   }
   if (req.method !== 'POST' || path !== '/session') {
@@ -156,12 +278,16 @@ function attachAliyun(server, deps) {
 }
 
 function createServer(deps) {
+  deps = deps || {};
+  if (!deps.hub) deps.hub = makeHub(deps);
   const server = http.createServer((req, res) => {
     handle(req, res, deps).catch((e) => {
       if (!res.headersSent) send(res, 500, { error: e.message || 'error' });
     });
   });
-  attachAliyun(server, deps || {});
+  attachAliyun(server, deps);
+  server.hub = deps.hub;
+  server.on('close', () => { try { deps.hub.stop(); } catch (e) {} });
   return server;
 }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.8.3
+// @version      1.8.4
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -3635,6 +3635,79 @@
     if (relayKey) u.searchParams.set('k', relayKey);
     return u.toString();
   }
+  // 中转的根地址：https://IP:8443/session → https://IP:8443
+  function relayBase(relay) {
+    const raw = String(relay || '').trim();
+    if (!raw) throw new Error('请填写中转地址');
+    const u = new URL(raw);
+    u.pathname = u.pathname.replace(/\/session\/?$/, '').replace(/\/$/, '');
+    u.search = ''; u.hash = '';
+    return u.toString().replace(/\/$/, '');
+  }
+  // 和中转之间的「类 WebSocket」通道，走 GM_xmlhttpRequest。
+  // WhatsApp 网页的安全策略（connect-src）只允许连 WhatsApp / Facebook 自己的域名，网页里 new WebSocket 到我们的服务器会被拦；
+  // GM_xmlhttpRequest 由 Tampermonkey 扩展发出，不受这条限制。发送：POST 批量；接收：长轮询。
+  const RELAY_POLL_TIMEOUT = 30000;
+  function openRelayChannel(relay, relayKey) {
+    const base = relayBase(relay);
+    const headers = { 'Content-Type': 'application/json' };
+    if (relayKey) headers.Authorization = 'Bearer ' + relayKey;
+    const ch = { readyState: 0, url: base + '/aliyun', onopen: null, onmessage: null, onclose: null, onerror: null };
+    let id = '';
+    let busy = false;
+    let fails = 0;
+    const out = [];
+    const post = (p, data, timeout) => callHttp({ method: 'POST', url: base + p, headers: headers, data: data || '{}', timeout: timeout || 15000 });
+    const end = (isErr) => {
+      if (ch.readyState === 3) return;
+      ch.readyState = 3;
+      if (isErr && ch.onerror) { try { ch.onerror(); } catch (e) {} }
+      if (ch.onclose) { try { ch.onclose(); } catch (e) {} }
+      if (id) post('/aliyun/close?id=' + id).catch(() => {});
+    };
+    const pump = () => {
+      if (busy || ch.readyState !== 1 || !out.length) return;
+      busy = true;
+      const batch = out.splice(0, 60);
+      post('/aliyun/send?id=' + id, JSON.stringify(batch)).then(() => { busy = false; pump(); }, () => { busy = false; end(true); });
+    };
+    const loop = async () => {
+      while (ch.readyState === 1) {
+        let r;
+        try {
+          r = JSON.parse(await post('/aliyun/poll?id=' + id, '{}', RELAY_POLL_TIMEOUT));
+          fails = 0;
+        } catch (e) {
+          if (ch.readyState !== 1) return;
+          if (/^HTTP 4/.test(String(e && e.message)) || ++fails >= 3) { end(true); return; }
+          await sleep(300 * fails);
+          continue;
+        }
+        (r.events || []).forEach((t) => {
+          if (ch.readyState === 1 && ch.onmessage) { try { ch.onmessage({ data: t }); } catch (e) {} }
+        });
+        if (r.closed) { end(false); return; }
+      }
+    };
+    ch.send = (text) => {
+      if (ch.readyState === 3) return;
+      out.push(String(text));
+      if (out.length > 600) out.splice(0, out.length - 600);
+      pump();
+    };
+    ch.close = () => end(false);
+    post('/aliyun/open', '{}').then((t) => {
+      const r = JSON.parse(t);
+      if (!r.id) throw new Error('中转没有返回会话');
+      if (ch.readyState === 3) { post('/aliyun/close?id=' + r.id).catch(() => {}); return; }
+      id = r.id;
+      ch.readyState = 1;
+      if (ch.onopen) { try { ch.onopen(); } catch (e) {} }
+      loop();
+      pump();
+    }).catch(() => end(true));
+    return ch;
+  }
   function pcm16ToBase64(int16) {
     const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
     let bin = '';
@@ -3655,10 +3728,11 @@
     return out;
   }
   function startAliyun(ctx) {
-    const WS = pageWin().WebSocket;
-    if (typeof WS !== 'function') return Promise.reject(new Error('这个浏览器没有 WebSocket'));
+    if (typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('没有 GM_xmlhttpRequest，无法连中转'));
     if (!callAudio) return Promise.reject(new Error('音频还没准备好'));
-    const url = aliyunWsUrl(store.get('callRelay', ''), store.get('callRelayKey', ''));
+    const relay = store.get('callRelay', '');
+    const relayKey = store.get('callRelayKey', '');
+    try { relayBase(relay); } catch (e) { return Promise.reject(e); }
     const update = aliyunSession({
       direction: ctx.direction,
       lang: ctx.lang,
@@ -3674,7 +3748,7 @@
     let zero = null;
     let micSrc = null;
     const openSocket = () => new Promise((resolve, reject) => {
-      const sock = new WS(url);
+      const sock = openRelayChannel(relay, relayKey);
       ws = sock;
       let settled = false;
       const fail = (err) => { if (!settled) { settled = true; reject(err); } };
@@ -3715,6 +3789,8 @@
       };
       sock.onclose = () => {
         ready = false;
+        // 还没配好会话就断了（中转连不上阿里云、密钥不对等）：让启动失败，交给上层重试或改回原声
+        if (!settled) { fail(new Error('翻译中转连接已断开')); return; }
         if (closed || reconnecting) return;
         ctx.onEvent({ type: 'close', message: '阿里云连接已断开' });
       };
@@ -3732,7 +3808,7 @@
     }
     try {
       micSrc = callAudio.createMediaStreamSource(new MediaStream([ctx.track]));
-      proc = callAudio.createScriptProcessor(4096, 1, 1);
+      proc = callAudio.createScriptProcessor(2048, 1, 1); // 约 43 毫秒一包，比 4096 少等一半
       zero = callAudio.createGain();
       zero.gain.value = 0;
       micSrc.connect(proc);
