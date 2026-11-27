@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp 发送翻译助手（中文→外语）
 // @namespace    rely-whatsapp-translator
-// @version      1.8.5
+// @version      1.8.6
 // @description  在 WhatsApp 网页版输入中文，自动翻译成英文/其他语言再发送；对方发来的外语自动在原文下方显示中文译文；AI 分析客户级别并给出回复建议；一键生成 PI 形式发票；语音通话可同声传译（默认关闭）。
 // @match        https://web.whatsapp.com/*
 // @grant        GM_xmlhttpRequest
@@ -3132,6 +3132,21 @@
   let callWatchedRemote = null;
   let callLastRemoteRms = 0;
   let callLastLocalRms = 0;
+  // 通话诊断：只记时间、次数、音量和状态，不记 Key。用来查「字幕慢」「没翻译」这类只在真通话里出现的问题。
+  const callDiag = { t0: Date.now(), log: [], n: {}, http: {}, lvl: { rMax: 0, lMax: 0, rSum: 0, lSum: 0, k: 0 } };
+  function diag(kind, info) {
+    try {
+      callDiag.n[kind] = (callDiag.n[kind] || 0) + 1;
+      if (info === undefined) return;
+      callDiag.log.push([Math.round((Date.now() - callDiag.t0) / 100) / 10, kind, info]);
+      if (callDiag.log.length > 400) callDiag.log.splice(0, callDiag.log.length - 400);
+    } catch (e) {}
+  }
+  function diagHttp(tag, ms) {
+    const h = callDiag.http[tag] || (callDiag.http[tag] = { n: 0, sum: 0, max: 0, last: 0 });
+    h.n++; h.sum += ms; h.last = ms; if (ms > h.max) h.max = ms;
+  }
+  function diagReset() { callDiag.t0 = Date.now(); callDiag.log = []; callDiag.n = {}; callDiag.http = {}; callDiag.lvl = { rMax: 0, lMax: 0, rSum: 0, lSum: 0, k: 0 }; }
   const callHist = { inZh: [], inSrc: [], out: [], me: [] };
   const callBucket = { inZh: '', inSrc: '', out: '', me: '' };
 
@@ -3701,7 +3716,8 @@
   // WhatsApp 网页的安全策略（connect-src）只允许连 WhatsApp / Facebook 自己的域名，网页里 new WebSocket 到我们的服务器会被拦；
   // GM_xmlhttpRequest 由 Tampermonkey 扩展发出，不受这条限制。发送：POST 批量；接收：长轮询。
   const RELAY_POLL_TIMEOUT = 30000;
-  function openRelayChannel(relay, relayKey) {
+  function openRelayChannel(relay, relayKey, tag) {
+    tag = tag || 'ch';
     const base = relayBase(relay);
     const headers = { 'Content-Type': 'application/json' };
     if (relayKey) headers.Authorization = 'Bearer ' + relayKey;
@@ -3722,16 +3738,24 @@
       if (busy || ch.readyState !== 1 || !out.length) return;
       busy = true;
       const batch = out.splice(0, 60);
-      post('/aliyun/send?id=' + id, JSON.stringify(batch)).then(() => { busy = false; pump(); }, () => { busy = false; end(true); });
+      const t = Date.now();
+      post('/aliyun/send?id=' + id, JSON.stringify(batch)).then(() => {
+        diagHttp(tag + '.send', Date.now() - t);
+        if (out.length > 20) diag(tag + '.backlog', out.length);
+        busy = false; pump();
+      }, (e) => { diag(tag + '.sendFail', String(e && e.message)); busy = false; end(true); });
     };
     const loop = async () => {
       while (ch.readyState === 1) {
         let r;
         try {
+          const t = Date.now();
           r = JSON.parse(await post('/aliyun/poll?id=' + id, '{}', RELAY_POLL_TIMEOUT));
+          diagHttp(tag + '.poll', Date.now() - t);
           fails = 0;
         } catch (e) {
           if (ch.readyState !== 1) return;
+          diag(tag + '.pollFail', String(e && e.message));
           if (/^HTTP 4/.test(String(e && e.message)) || ++fails >= 3) { end(true); return; }
           await sleep(300 * fails);
           continue;
@@ -3749,7 +3773,9 @@
       pump();
     };
     ch.close = () => end(false);
+    const tOpen = Date.now();
     post('/aliyun/open', '{}').then((t) => {
+      diag(tag + '.open', Date.now() - tOpen);
       const r = JSON.parse(t);
       if (!r.id) throw new Error('中转没有返回会话');
       if (ch.readyState === 3) { post('/aliyun/close?id=' + r.id).catch(() => {}); return; }
@@ -3758,7 +3784,7 @@
       if (ch.onopen) { try { ch.onopen(); } catch (e) {} }
       loop();
       pump();
-    }).catch(() => end(true));
+    }).catch((e) => { diag(tag + '.openFail', String(e && e.message)); end(true); });
     return ch;
   }
   function pcm16ToBase64(int16) {
@@ -3801,7 +3827,7 @@
     let zero = null;
     let micSrc = null;
     const openSocket = () => new Promise((resolve, reject) => {
-      const sock = openRelayChannel(relay, relayKey);
+      const sock = openRelayChannel(relay, relayKey, ctx.direction);
       ws = sock;
       let settled = false;
       const fail = (err) => { if (!settled) { settled = true; reject(err); } };
@@ -3810,6 +3836,8 @@
       sock.onmessage = (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        diag(ctx.direction + '.ev.' + msg.type);
+        if (msg.type !== 'response.audio.delta' && msg.type !== 'response.text.delta' && msg.type !== 'response.audio_transcript.delta' && msg.type !== 'conversation.item.input_audio_transcription.delta') diag(ctx.direction + '.ev', msg.type);
         if (msg.type === 'session.created') {
           try { sock.send(JSON.stringify(update)); } catch (e) { fail(e); }
           return;
@@ -3872,6 +3900,7 @@
         const input = ev.inputBuffer.getChannelData(0);
         const pcm = downsampleTo16k(input, callAudio.sampleRate || 48000);
         if (!pcm.length) return;
+        diag(ctx.direction + '.pkt');
         try { ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: pcm16ToBase64(pcm) })); } catch (e) {}
       };
     } catch (e) { /* 没有采集节点时仍允许会话配置，测试用假 WebSocket */ }
@@ -3918,6 +3947,7 @@
   } catch (e) { /* ignore */ }
 
   function setCallStatus(text) {
+    if ((text || '') !== callStatusText) diag('status', text || '');
     callStatusText = text || '';
     paintCall();
   }
@@ -4158,6 +4188,10 @@
   }
   function noteCallLevels(remoteRms, localRms) {
     const now = Date.now();
+    const L = callDiag.lvl;
+    L.k++; L.rSum += remoteRms; L.lSum += localRms;
+    if (remoteRms > L.rMax) L.rMax = remoteRms;
+    if (localRms > L.lMax) L.lMax = localRms;
     if (remoteRms >= callRemoteRms()) {
       callHeardRemote = true;
       callRemoteHot = true;
@@ -4171,6 +4205,7 @@
   }
   function applySpeakerGate() {
     const close = gateShouldClose();
+    if (callGateOpen === close) diag('gate', close ? 'closed' : 'open');
     callGateOpen = !close;
     if (callGate && callAudio) {
       const g = close ? 0 : 1;
@@ -4305,6 +4340,7 @@
     } catch (e) { /* 译文声音接不上时，下面的回退会放原声 */ }
   }
   function deliverOriginal(silent, message) {
+    diag('original', message || '');
     callFallback = true;
     callEngaged = false;
     applyCallDuck();
@@ -4322,6 +4358,7 @@
     }
   }
   function deliverMix() {
+    diag('mix', callTargetLang());
     if (callTargetLang() === 'zh') {
       deliverOriginal(true, '对方在说中文，已直接送出您的原声');
       return;
@@ -4617,6 +4654,7 @@
   function endVoipCall(why) {
     const v = callVoip;
     if (!v) return;
+    diag('voipEnd', why || '');
     v.ended = true;
     shutdownCall(why || '');
     if (v.mapped && v.raw) { try { v.raw.stop(); } catch (e) {} } // WhatsApp 拿的是克隆，原麦克风由插件关掉
@@ -4626,6 +4664,8 @@
   }
   async function beginVoipCall() {
     if (callStarting) return;
+    diagReset();
+    diag('voipBegin', { mapped: !!(callVoip && callVoip.mapped), remote: !!(callVoip && callVoip.remote), rate: callAudio ? callAudio.sampleRate : 0, mode: callAudioMode(), target: callTargetLang() });
     callStarting = true;
     callPhase = 'starting';
     callActivePc = VOIP_MARK;
@@ -4914,6 +4954,24 @@
       overlay: overlay,
     };
   }
+  function callDiagReport() {
+    const L = callDiag.lvl;
+    const http = {};
+    Object.keys(callDiag.http).forEach((k) => { const h = callDiag.http[k]; http[k] = { n: h.n, avg: Math.round(h.sum / Math.max(1, h.n)), max: h.max, last: h.last }; });
+    const st = callState();
+    delete st.overlay;
+    return {
+      version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '',
+      secs: Math.round((Date.now() - callDiag.t0) / 1000),
+      state: st,
+      counts: callDiag.n,
+      http: http,
+      levels: { remoteAvg: L.k ? +(L.rSum / L.k).toFixed(4) : 0, remoteMax: +L.rMax.toFixed(4), localAvg: L.k ? +(L.lSum / L.k).toFixed(4) : 0, localMax: +L.lMax.toFixed(4), thresholds: [callRemoteRms(), callLocalRms()] },
+      captions: { inZh: callHist.inZh.length, inSrc: callHist.inSrc.length, out: callHist.out.length, me: callHist.me.length },
+      log: callDiag.log.slice(-150),
+    };
+  }
+  try { Object.defineProperty(pageWin(), '__watCallDiag', { value: callDiagReport, configurable: true, writable: true }); } catch (e) {}
   function attachCallForTest(pc) { callForcedPc = pc; callTick(); }
   function failCallOut() { if (callOut && callOut.fail) callOut.fail(); }
   function setCallOn(v) {

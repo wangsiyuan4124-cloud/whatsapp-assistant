@@ -112,6 +112,8 @@ const WORKLET = [
   assert(s.voipRemote, 'playback processor tapped for captions');
   assert(s.engaged && s.ttsGain === 1 && Math.abs(s.duckGain - 0.15) < 0.01, 'translation engaged: TTS on, original ducked ' + s.ttsGain + ' ' + s.duckGain);
   assert(s.boxVisible && /通话同传/.test(s.overlay), 'overlay shows during the call');
+  const rep = await page.evaluate(() => window.__watCallDiag());
+  assert(rep && rep.state && rep.state.voip && rep.counts && rep.log.some((x) => x[1] === 'voipBegin') && !('overlay' in rep.state), 'diagnostic report available on the page (no captions text) ' + JSON.stringify(rep.counts));
 
   const rms = await page.evaluate(async () => {
     await new Promise((r) => setTimeout(r, 300));
